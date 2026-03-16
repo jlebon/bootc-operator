@@ -1,0 +1,160 @@
+variant: fcos
+version: 1.6.0
+storage:
+  files:
+    # Disable ZRAM swap
+    - path: /etc/systemd/zram-generator.conf
+      mode: 0644
+      contents:
+        inline: ""
+    # Download Kubernetes Binaries
+    - path: /usr/local/bin/kubeadm
+      mode: 0755
+      contents:
+        source: "https://dl.k8s.io/release/v1.35.2/bin/linux/amd64/kubeadm"
+    - path: /usr/local/bin/kubelet
+      mode: 0755
+      contents:
+        source: "https://dl.k8s.io/release/v1.35.2/bin/linux/amd64/kubelet"
+    - path: /usr/local/bin/kubectl
+      mode: 0755
+      contents:
+        source: "https://dl.k8s.io/release/v1.35.2/bin/linux/amd64/kubectl"
+    # Flannel requires bridge netfilter to filter traffic crossing Linux bridges
+    - path: /etc/modules-load.d/kubernetes.conf
+      mode: 0644
+      contents:
+        inline: |
+          br_netfilter
+    # Kubernetes requires IP forwarding for pod-to-pod traffic across nodes,
+    # and bridge netfilter so iptables rules apply to bridged traffic
+    - path: /etc/sysctl.d/99-kubernetes.conf
+      mode: 0644
+      contents:
+        inline: |
+          net.ipv4.ip_forward = 1
+          net.bridge.bridge-nf-call-iptables = 1
+    - path: /etc/kubernetes/kubeadm.conf
+      mode: 0644
+      contents:
+        inline: |
+          apiVersion: kubeadm.k8s.io/v1beta4
+          kind: ClusterConfiguration
+          networking:
+            # Must match the default in Flannel's net-conf.json
+            podSubnet: 10.244.0.0/16
+          controllerManager:
+            extraArgs:
+              # The kube-controller-manager always mounts the flex volume plugin dir
+              # (even though FlexVolume is deprecated in favor of CSI). The default
+              # path is under /usr which is read-only on FCOS, so redirect it.
+              # This can be dropped in kubeadm v1.36. See:
+              # https://github.com/kubernetes/kubernetes/pull/136423
+              - name: flex-volume-plugin-dir
+                value: /var/lib/kubelet/volumeplugins
+          ---
+          apiVersion: kubelet.config.k8s.io/v1beta1
+          kind: KubeletConfiguration
+          volumePluginDir: /var/lib/kubelet/volumeplugins
+    # Flannel CNI manifest
+    - path: /etc/kubernetes/flannel.yml
+      mode: 0644
+      contents:
+        source: "https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml"
+    # Shell alias and completions
+    - path: /etc/profile.d/kubernetes.sh
+      mode: 0644
+      contents:
+        inline: |
+          alias k=kubectl
+          source <(kubectl completion bash)
+          complete -o default -F __start_kubectl k
+    # Make sure containerd is using systemd for its cgroups driver. Kubelet
+    # inherits this directly from containerd, so we don't need to repeat it
+    # there.
+    - path: /etc/containerd/config.toml
+      mode: 0644
+      overwrite: true
+      contents:
+        inline: |
+          version = 3
+          [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
+            SystemdCgroup = true
+systemd:
+  units:
+    - name: containerd.service
+      enabled: true
+    # Mount the host's /mnt into the VM via virtiofs. This is always
+    # present (virtiofsd always runs); the contents depend on what the
+    # user bind-mounted into /mnt on the container.
+    - name: var-mnt.mount
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Mount host /mnt via virtiofs
+
+        [Mount]
+        What=hostmnt
+        Where=/var/mnt
+        Type=virtiofs
+
+        [Install]
+        WantedBy=multi-user.target
+    # This is needed by flannel
+    - name: cni-plugins-install.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Install CNI plugins (FCOS does not ship them, but Flannel needs at least loopback)
+        Before=kubelet.service
+        After=network-online.target
+        Wants=network-online.target
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        ExecStartPre=/usr/bin/mkdir -p /opt/cni/bin
+        ExecStart=/usr/bin/bash -c 'curl -sL https://github.com/containernetworking/plugins/releases/download/v1.6.2/cni-plugins-linux-amd64-v1.6.2.tgz | tar -xz -C /opt/cni/bin'
+
+        [Install]
+        WantedBy=multi-user.target
+    - name: kubelet.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=kubelet: The Kubernetes Node Agent
+        Documentation=https://kubernetes.io/docs/
+        Wants=network-online.target
+        After=network-online.target containerd.service cni-plugins-install.service
+
+        [Service]
+        ExecStartPre=/usr/bin/mkdir -p /var/lib/kubelet /var/lib/kubelet/volumeplugins
+        ExecStart=/usr/local/bin/kubelet --kubeconfig=/etc/kubernetes/kubelet.conf --config=/var/lib/kubelet/config.yaml --container-runtime-endpoint=unix:///run/containerd/containerd.sock
+        Restart=always
+        StartLimitInterval=0
+        RestartSec=10
+
+        [Install]
+        WantedBy=multi-user.target
+    - name: kubeadm-bootstrap.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Bootstrap Kubernetes Single Node
+        # Only run on first boot; kubeadm init creates admin.conf
+        ConditionPathExists=!/etc/kubernetes/admin.conf
+        After=kubelet.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        ExecStart=/usr/local/bin/kubeadm init --config=/etc/kubernetes/kubeadm.conf
+        # Allow scheduling workloads on the control plane (single-node cluster)
+        ExecStart=/usr/local/bin/kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane-
+        ExecStart=/usr/bin/mkdir -p /home/core/.kube
+        ExecStart=/usr/bin/cp /etc/kubernetes/admin.conf /home/core/.kube/config
+        ExecStart=/usr/bin/chown core:core /home/core/.kube/config
+        ExecStart=/usr/local/bin/kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /etc/kubernetes/flannel.yml
+
+        [Install]
+        WantedBy=multi-user.target

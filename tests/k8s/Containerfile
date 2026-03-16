@@ -1,0 +1,20 @@
+FROM quay.io/fedora/fedora-minimal
+
+ARG DNF_FLAGS="-y --setopt=install_weak_deps=False"
+RUN dnf install ${DNF_FLAGS} \
+        qemu-system-x86-core qemu-img butane virtiofsd \
+        openssh-clients curl xz jq && \
+    dnf clean all
+
+# Download the latest stable FCOS qemu qcow2 image.
+RUN STREAM=https://builds.coreos.fedoraproject.org/streams/stable.json && \
+    URL=$(curl -sSfL "${STREAM}" | \
+      jq -r '.architectures.x86_64.artifacts.qemu.formats["qcow2.xz"].disk.location') && \
+    mkdir -p /usr/share/fcos && \
+    curl -sSfL "${URL}" | xzcat > /usr/share/fcos/image.qcow2
+
+COPY config.bu /usr/share/fcos/config.bu
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
