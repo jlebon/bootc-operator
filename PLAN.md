@@ -1114,8 +1114,8 @@ execute bootc commands on the host via nsenter.
 - [x] `SetupWithManager`: `For(BootcNodePool)`,
       `Watches(BootcNode, findPoolsForBootcNode)`,
       `Watches(Node, findPoolsForNode)`
-- [x] RBAC markers (bootcnodepools, bootcnodes, nodes, events).
-      pods/pods/eviction RBAC deferred to drain manager (item 7).
+- [x] RBAC markers (bootcnodepools, bootcnodes, nodes, events,
+      pods, pods/eviction). Drain RBAC added with item 7.
 - [x] Integration tests (envtest): 15 tests covering condition init,
       finalizer, deletion cleanup, node claiming/releasing, overlap
       detection, status counters/phases, nodeSelector changes, image
@@ -1160,19 +1160,35 @@ execute bootc commands on the host via nsenter.
 - [ ] Health check: track time since desiredPhase was set to Rebooting.
       If node doesn't become Ready within healthCheck.timeout → trigger
       rollback (set desiredPhase=RollingBack). Deferred to item 9.
-- [ ] Drain: currently cordons only; drain (pod eviction) deferred to
-      item 7 (drain manager)
+- [x] Drain: integrated via `pkg/drain.Drainer` (item 7). Nodes are
+      now cordoned AND drained (pods evicted, PDBs respected) before
+      `desiredPhase=Rebooting` is set.
 
 ### 7. Drain manager
 
 `pkg/drain/` -- wraps `k8s.io/kubectl/pkg/drain`.
 
-- [ ] `pkg/drain/drain.go`:
-      - `Cordon(ctx, client, nodeName) error`
-      - `Drain(ctx, client, nodeName) error` -- evicts pods, respects PDBs,
-        `IgnoreAllDaemonSets: true`, configurable timeout/grace period
-      - `Uncordon(ctx, client, nodeName) error`
-- [ ] Unit tests with fake client
+- [x] `pkg/drain/drain.go`:
+      - `Drainer` interface with `Cordon(ctx, nodeName)`,
+        `Drain(ctx, nodeName)`, `Uncordon(ctx, nodeName)`
+      - `NewDrainer(clientset, Options)` constructor wrapping
+        `k8s.io/kubectl/pkg/drain.Helper`
+      - `Options`: configurable `Timeout`, `GracePeriodSeconds`,
+        `DeleteEmptyDirData`, `Force`, `Out`/`ErrOut` writers
+      - `IgnoreAllDaemonSets: true` by default (bootc-daemon DaemonSet
+        must not be evicted)
+      - Respects PDBs (eviction-based, not delete)
+- [x] Unit tests with fake clientset: 10 tests covering cordon,
+      uncordon, drain (empty node, pod eviction, DaemonSet ignored,
+      PDB rejection), defaults, custom options. 100% coverage.
+- [x] Integrated into rollout orchestration (`internal/controller/rollout.go`):
+      `advanceStagedNodes()` now calls `Drain()` after cordon and before
+      setting `desiredPhase=Rebooting`. Drainer injected via reconciler field.
+- [x] RBAC markers added: `pods` (get/list/delete), `pods/eviction` (create)
+- [x] Wired up in `cmd/operator/main.go`: creates kubernetes clientset
+      from manager config, instantiates `drain.NewDrainer` with
+      `DeleteEmptyDirData: true`, passes to reconciler
+- [x] `noopDrainer` fallback for tests that don't configure a Drainer
 
 ### 8. Soft reboot
 

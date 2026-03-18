@@ -27,6 +27,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -37,6 +38,7 @@ import (
 
 	bootcdevv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
 	"github.com/jlebon/bootc-operator/internal/controller"
+	"github.com/jlebon/bootc-operator/pkg/drain"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -178,9 +180,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Create a kubernetes clientset for the drain manager (the drain
+	// package wraps kubectl's drain logic which requires a clientset).
+	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
+	if err != nil {
+		setupLog.Error(err, "Failed to create kubernetes clientset")
+		os.Exit(1)
+	}
+
+	drainer := drain.NewDrainer(clientset, drain.Options{
+		DeleteEmptyDirData: true,
+	})
+
 	if err := (&controller.BootcNodePoolReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:  mgr.GetClient(),
+		Scheme:  mgr.GetScheme(),
+		Drainer: drainer,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "BootcNodePool")
 		os.Exit(1)

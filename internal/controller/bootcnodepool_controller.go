@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	v1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
+	"github.com/jlebon/bootc-operator/pkg/drain"
 )
 
 const (
@@ -64,7 +65,8 @@ const (
 // BootcNodePoolReconciler reconciles a BootcNodePool object
 type BootcNodePoolReconciler struct {
 	client.Client
-	Scheme *runtime.Scheme
+	Scheme  *runtime.Scheme
+	Drainer drain.Drainer
 }
 
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodepools,verbs=get;list;watch;create;update;patch;delete
@@ -73,6 +75,8 @@ type BootcNodePoolReconciler struct {
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;delete
+// +kubebuilder:rbac:groups="",resources=pods/eviction,verbs=create
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile moves the cluster closer to the desired state defined by a

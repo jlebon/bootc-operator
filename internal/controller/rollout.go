@@ -25,6 +25,7 @@ import (
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
+	"github.com/jlebon/bootc-operator/pkg/drain"
 )
 
 // rolloutResult contains the outcome of a rollout orchestration step,
@@ -185,6 +186,25 @@ func (r *BootcNodePoolReconciler) uncordonReadyNodes(
 	return nil
 }
 
+// drainerOrNoop returns the reconciler's Drainer, or a noop
+// implementation if none is configured (for tests that don't set up a
+// Drainer).
+func (r *BootcNodePoolReconciler) drainerOrNoop() drain.Drainer {
+	if r.Drainer != nil {
+		return r.Drainer
+	}
+	return &noopDrainer{}
+}
+
+// noopDrainer is a Drainer that does nothing. Used as a fallback when
+// no Drainer is configured (e.g. in tests that predate drain
+// integration).
+type noopDrainer struct{}
+
+func (n *noopDrainer) Cordon(_ context.Context, _ string) error   { return nil }
+func (n *noopDrainer) Drain(_ context.Context, _ string) error    { return nil }
+func (n *noopDrainer) Uncordon(_ context.Context, _ string) error { return nil }
+
 // advanceStagedNodes selects staged nodes to advance to Rebooting,
 // respecting maxUnavailable. It cordons each selected node and sets
 // its desiredPhase to Rebooting.
@@ -233,6 +253,8 @@ func (r *BootcNodePoolReconciler) advanceStagedNodes(
 		toAdvance = toAdvance[:available]
 	}
 
+	d := r.drainerOrNoop()
+
 	for _, bn := range toAdvance {
 		node, ok := nodeMap[bn.Name]
 		if !ok {
@@ -254,6 +276,14 @@ func (r *BootcNodePoolReconciler) advanceStagedNodes(
 			}
 			log.Info("Cordoned node for reboot", "node", node.Name)
 		}
+
+		// Drain the node: evict all evictable pods before rebooting.
+		// DaemonSet pods (including our own daemon) are ignored.
+		if err := d.Drain(ctx, node.Name); err != nil {
+			log.Error(err, "Failed to drain node", "node", node.Name)
+			continue
+		}
+		log.Info("Drained node for reboot", "node", node.Name)
 
 		// Set desiredPhase=Rebooting to tell the daemon to apply and
 		// reboot.
