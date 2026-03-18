@@ -86,9 +86,16 @@ func createPool(ctx context.Context, name string, spec v1alpha1.BootcNodePoolSpe
 
 // reconcilePool runs one reconciliation cycle for the named pool.
 func reconcilePool(ctx context.Context, name string) (reconcile.Result, error) {
+	return reconcilePoolWithOpts(ctx, name, nil)
+}
+
+// reconcilePoolWithOpts runs one reconciliation cycle with optional
+// overrides for the Now function.
+func reconcilePoolWithOpts(ctx context.Context, name string, now func() time.Time) (reconcile.Result, error) {
 	reconciler := &BootcNodePoolReconciler{
 		Client: k8sClient,
 		Scheme: k8sClient.Scheme(),
+		Now:    now,
 	}
 	return reconciler.Reconcile(ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: name},
@@ -1160,6 +1167,315 @@ var _ = Describe("BootcNodePool Controller", func() {
 
 			pool := getPool(ctx, poolName)
 			Expect(pool.Status.Phase).To(Equal(v1alpha1.BootcNodePoolPhaseRolling))
+		})
+
+		It("should set rebooting-since annotation when advancing to Rebooting", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+
+			bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			fixedTime := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+			_, err := reconcilePoolWithOpts(ctx, poolName, func() time.Time { return fixedTime })
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseRebooting))
+			Expect(bn.Annotations[rebootingSinceAnnotation]).To(Equal(fixedTime.Format(time.RFC3339)))
+		})
+
+		It("should clear rebooting-since annotation after successful reboot", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// Stage and advance to Rebooting.
+			bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Annotations[rebootingSinceAnnotation]).NotTo(BeEmpty())
+
+			// Simulate successful reboot.
+			bn.Status.Phase = v1alpha1.BootcNodePhaseReady
+			bn.Status.Booted.Image = testImage
+			bn.Status.Staged = v1alpha1.BootEntryStatus{}
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			_, err = reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Annotations[rebootingSinceAnnotation]).To(BeEmpty())
+		})
+
+		It("should trigger rollback when health check timeout expires", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+				HealthCheck: v1alpha1.HealthCheckConfig{
+					Timeout: metav1.Duration{Duration: 2 * time.Minute},
+				},
+			})
+
+			// Stage and advance to Rebooting at T=0.
+			bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			t0 := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+			_, err := reconcilePoolWithOpts(ctx, poolName, func() time.Time { return t0 })
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseRebooting))
+
+			// Simulate the node is still rebooting (daemon reports
+			// Rebooting phase, not Ready yet).
+			bn.Status.Phase = v1alpha1.BootcNodePhaseRebooting
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile at T+1m: within timeout, should stay Rebooting.
+			t1 := t0.Add(1 * time.Minute)
+			_, err = reconcilePoolWithOpts(ctx, poolName, func() time.Time { return t1 })
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseRebooting))
+
+			// Reconcile at T+3m: past 2m timeout, should trigger
+			// rollback.
+			t3 := t0.Add(3 * time.Minute)
+			_, err = reconcilePoolWithOpts(ctx, poolName, func() time.Time { return t3 })
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseRollingBack))
+		})
+
+		It("should use default timeout when healthCheck.timeout is not set", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+				// No HealthCheck specified -- should default to 5m.
+			})
+
+			// Stage and advance to Rebooting.
+			bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			t0 := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+			_, err := reconcilePoolWithOpts(ctx, poolName, func() time.Time { return t0 })
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate the node is still rebooting.
+			bn = getBootcNode(ctx, nodeName1)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseRebooting
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// At T+4m: within default 5m timeout.
+			t4 := t0.Add(4 * time.Minute)
+			_, err = reconcilePoolWithOpts(ctx, poolName, func() time.Time { return t4 })
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseRebooting))
+
+			// At T+6m: past default 5m timeout.
+			t6 := t0.Add(6 * time.Minute)
+			_, err = reconcilePoolWithOpts(ctx, poolName, func() time.Time { return t6 })
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseRollingBack))
+		})
+
+		It("should mark completed rollback nodes as errored and degrade pool", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// Simulate a node that was rolling back and has come
+			// back on the old image. Set the BootcNode to match
+			// what the classify logic expects:
+			// desiredPhase=RollingBack, status.Phase=Ready,
+			// booted image != desired image.
+			bn.Labels = map[string]string{poolLabelKey: poolName}
+			bn.Spec.DesiredImage = testImage
+			bn.Spec.DesiredPhase = v1alpha1.BootcNodeDesiredPhaseRollingBack
+			bn.Spec.RebootPolicy = v1alpha1.RebootPolicyAuto
+			bn.Annotations = map[string]string{
+				rebootingSinceAnnotation: time.Now().Add(-10 * time.Minute).Format(time.RFC3339),
+			}
+			Expect(k8sClient.Update(ctx, bn)).To(Succeed())
+
+			bn.Status.Phase = v1alpha1.BootcNodePhaseReady
+			bn.Status.Booted.Image = "quay.io/example/old-image@sha256:olddigest"
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Cordon the node to simulate it was cordoned during
+			// the reboot phase.
+			updatedNode := &corev1.Node{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName1}, updatedNode)).To(Succeed())
+			updatedNode.Spec.Unschedulable = true
+			Expect(k8sClient.Update(ctx, updatedNode)).To(Succeed())
+
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Node should be marked as Error.
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Status.Phase).To(Equal(v1alpha1.BootcNodePhaseError))
+			Expect(bn.Status.Message).To(ContainSubstring("Rollback completed"))
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseStaged))
+			Expect(bn.Annotations[rebootingSinceAnnotation]).To(BeEmpty())
+
+			// Node should be uncordoned.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName1}, updatedNode)).To(Succeed())
+			Expect(updatedNode.Spec.Unschedulable).To(BeFalse())
+
+			// Pool should be Degraded.
+			pool := getPool(ctx, poolName)
+			Expect(pool.Status.Phase).To(Equal(v1alpha1.BootcNodePoolPhaseDegraded))
+		})
+
+		It("should not trigger rollback on rebooting nodes without timeout", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+				HealthCheck: v1alpha1.HealthCheckConfig{
+					Timeout: metav1.Duration{Duration: 10 * time.Minute},
+				},
+			})
+
+			// Stage and advance to Rebooting.
+			bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			t0 := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+			_, err := reconcilePoolWithOpts(ctx, poolName, func() time.Time { return t0 })
+			Expect(err).NotTo(HaveOccurred())
+
+			// Node is rebooting.
+			bn = getBootcNode(ctx, nodeName1)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseRebooting
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile at T+5m (within 10m timeout).
+			t5 := t0.Add(5 * time.Minute)
+			_, err = reconcilePoolWithOpts(ctx, poolName, func() time.Time { return t5 })
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseRebooting))
+
+			pool := getPool(ctx, poolName)
+			Expect(pool.Status.Phase).To(Equal(v1alpha1.BootcNodePoolPhaseRolling))
+		})
+
+		It("should stop advancing other nodes when a node is rolling back", func() {
+			// Create 2 nodes, both staged.
+			node1 := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn1 := createBootcNode(ctx, nodeName1, node1)
+			bn1.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn1.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn1)).To(Succeed())
+
+			node2 := createNode(ctx, nodeName2, map[string]string{
+				"role": "worker",
+			})
+			bn2 := createBootcNode(ctx, nodeName2, node2)
+			bn2.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn2.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn2)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+				Rollout: v1alpha1.RolloutConfig{
+					MaxUnavailable: 2,
+				},
+			})
+
+			// Advance both nodes.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate node1 is rolling back.
+			bn1 = getBootcNode(ctx, nodeName1)
+			bn1.Spec.DesiredPhase = v1alpha1.BootcNodeDesiredPhaseRollingBack
+			Expect(k8sClient.Update(ctx, bn1)).To(Succeed())
+			bn1.Status.Phase = v1alpha1.BootcNodePhaseRollingBack
+			Expect(k8sClient.Status().Update(ctx, bn1)).To(Succeed())
+
+			// Simulate node2 completed successfully.
+			bn2 = getBootcNode(ctx, nodeName2)
+			bn2.Status.Phase = v1alpha1.BootcNodePhaseReady
+			bn2.Status.Booted.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn2)).To(Succeed())
+
+			// Reconcile: should requeue (waiting for rollback).
+			result, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(activeRolloutInterval))
 		})
 
 		It("should handle image update mid-rollout by resetting desiredPhase", func() {

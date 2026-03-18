@@ -1157,9 +1157,10 @@ execute bootc commands on the host via nsenter.
       preserve Rebooting phase, error stops rollout, full multi-batch
       rolling update, pool phase Rolling when staged, image update
       mid-rollout. Controller coverage: 76.8%.
-- [ ] Health check: track time since desiredPhase was set to Rebooting.
-      If node doesn't become Ready within healthCheck.timeout → trigger
-      rollback (set desiredPhase=RollingBack). Deferred to item 9.
+- [x] Health check: implemented in item 9. `checkRebootTimeouts()`
+      tracks time via `bootc.dev/rebooting-since` annotation. Nodes
+      that exceed `healthCheck.timeout` are set to
+      desiredPhase=RollingBack.
 - [x] Drain: integrated via `pkg/drain.Drainer` (item 7). Nodes are
       now cordoned AND drained (pods evicted, PDBs respected) before
       `desiredPhase=Rebooting` is set.
@@ -1192,29 +1193,49 @@ execute bootc commands on the host via nsenter.
 
 ### 8. Soft reboot
 
-- [ ] Daemon: when `desiredPhase=Rebooting`, read `spec.rebootPolicy`:
-      - `Auto`: check `status.staged.softRebootCapable`. If true, pass
-        `--soft-reboot=auto` to bootc. If false, full reboot.
-      - `Full`: always full reboot (don't pass `--soft-reboot`).
-      - `Never`: stage only, do not reboot (daemon sets phase=Staged and
-        waits; operator should not set desiredPhase=Rebooting for Never).
-- [ ] BootcNode status: daemon populates `softRebootCapable` from
-      `bootc status --json` staged deployment info.
-- [ ] Pool reconciler: copy `disruption.rebootPolicy` from BootcNodePool
-      to `spec.rebootPolicy` on each claimed BootcNode.
+- [x] Daemon: when `desiredPhase=Rebooting`, read `spec.rebootPolicy`:
+      `shouldSoftReboot()` in `daemon.go` checks policy and staged
+      deployment's `SoftRebootCapable` flag. `Auto`/empty → soft reboot
+      if capable; `Full`/`Never` → no soft reboot. `UpgradeApply()`
+      appends `--soft-reboot=auto` when enabled.
+- [x] BootcNode status: daemon populates `softRebootCapable` from
+      `bootc status --json` staged deployment info via
+      `pkg/bootc/status.go:ToBootEntryStatus`.
+- [x] Pool reconciler: `claimBootcNode()` copies
+      `disruption.rebootPolicy` from BootcNodePool to
+      `spec.rebootPolicy` on each claimed BootcNode, defaulting to
+      `Auto` when empty.
+- [x] Unit tests: `TestReconcileRebootingSoftRebootAuto`,
+      `TestReconcileRebootingFullPolicy`, `TestShouldSoftReboot` (9
+      sub-tests) covering Auto/Full/Never/empty policies.
 
 ### 9. Auto rollback
 
-- [ ] Operator: after setting desiredPhase=Rebooting on a BootcNode, start
-      a timer (healthCheck.timeout).
-- [ ] On each reconcile: if the node hasn't reached Ready within the
-      timeout, set desiredPhase=RollingBack.
-- [ ] Daemon: handle RollingBack phase → run `bootc rollback --apply`.
-- [ ] Operator: if rollback succeeds (node comes back on old image), mark
-      BootcNode as Error, set pool Degraded, stop rollout.
-- [ ] If rollback fails (node unreachable): bootloader falls back
-      automatically (A/B boot). Operator detects old image in BootcNode
-      status after node returns.
+- [x] Operator: when advancing a BootcNode to desiredPhase=Rebooting
+      (in `advanceStagedNodes`), sets a `bootc.dev/rebooting-since`
+      annotation with the current RFC3339 timestamp.
+- [x] On each reconcile: `checkRebootTimeouts()` checks rebooting
+      nodes against `healthCheck.timeout` (default 5m). If elapsed
+      time exceeds the timeout, sets desiredPhase=RollingBack.
+- [x] Daemon: handles RollingBack phase → runs `bootc rollback --apply`
+      (already implemented in item 4).
+- [x] Operator: `handleCompletedRollbacks()` detects nodes that
+      completed rollback (desiredPhase=RollingBack, status.Phase=Ready,
+      booted image != desired). Uncordons the node, clears the
+      rebooting-since annotation, resets desiredPhase=Staged, and
+      sets status.Phase=Error with a descriptive message. This
+      triggers existing Degraded logic to stop the rollout.
+- [x] `classifyNodes()` extended with `rolledBack` category to
+      distinguish completed rollbacks from regular needsStaging nodes.
+- [x] `uncordonReadyNodes()` clears the rebooting-since annotation
+      when a node successfully reboots into the desired image.
+- [x] `BootcNodePoolReconciler.Now` field (func() time.Time) for
+      testability, defaults to `time.Now`.
+- [x] Integration tests: 7 tests covering annotation setting/clearing,
+      timeout trigger with custom and default timeouts, completed
+      rollback handling (Error status, uncordon, Degraded pool),
+      no-false-positive within timeout, and waiting during active
+      rollback. Controller coverage: 78.0%.
 
 ### 10. Events
 

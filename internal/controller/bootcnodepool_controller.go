@@ -67,6 +67,20 @@ type BootcNodePoolReconciler struct {
 	client.Client
 	Scheme  *runtime.Scheme
 	Drainer drain.Drainer
+
+	// Now returns the current time. Defaults to time.Now. Override in
+	// tests to control time-dependent behavior (e.g. health check
+	// timeouts).
+	Now func() time.Time
+}
+
+// now returns the current time, using the reconciler's Now function if
+// set, otherwise defaulting to time.Now.
+func (r *BootcNodePoolReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodepools,verbs=get;list;watch;create;update;patch;delete

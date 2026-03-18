@@ -20,12 +20,26 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	v1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
 	"github.com/jlebon/bootc-operator/pkg/drain"
+)
+
+const (
+	// rebootingSinceAnnotation is the annotation set on a BootcNode
+	// when the operator advances it to desiredPhase=Rebooting. The
+	// value is an RFC3339 timestamp used to detect health check
+	// timeouts.
+	rebootingSinceAnnotation = "bootc.dev/rebooting-since"
+
+	// defaultHealthCheckTimeout is used when the pool's
+	// healthCheck.timeout is not set.
+	defaultHealthCheckTimeout = 5 * time.Minute
 )
 
 // rolloutResult contains the outcome of a rollout orchestration step,
@@ -48,6 +62,7 @@ type nodeClassification struct {
 	staging        []*v1alpha1.BootcNode // still downloading
 	rebooting      []*v1alpha1.BootcNode // desiredPhase=Rebooting, not yet ready
 	rollingBack    []*v1alpha1.BootcNode // rolling back
+	rolledBack     []*v1alpha1.BootcNode // completed rollback: Ready on old image with desiredPhase=RollingBack
 	errored        []*v1alpha1.BootcNode // error state
 	needsStaging   []*v1alpha1.BootcNode // ready but on old image, needs staging
 }
@@ -62,6 +77,14 @@ func classifyNodes(claimed []*v1alpha1.BootcNode, desiredImage string) nodeClass
 			nc.errored = append(nc.errored, bn)
 		case bn.Status.Phase == v1alpha1.BootcNodePhaseRollingBack:
 			nc.rollingBack = append(nc.rollingBack, bn)
+		// A node that was rolling back and is now Ready on the old
+		// image has completed its rollback. This is distinct from
+		// "needsStaging" because the operator should mark it as
+		// failed, not re-stage it.
+		case bn.Spec.DesiredPhase == v1alpha1.BootcNodeDesiredPhaseRollingBack &&
+			bn.Status.Phase == v1alpha1.BootcNodePhaseReady &&
+			bn.Status.Booted.Image != desiredImage:
+			nc.rolledBack = append(nc.rolledBack, bn)
 		case bn.Spec.DesiredPhase == v1alpha1.BootcNodeDesiredPhaseRebooting &&
 			bn.Status.Phase != v1alpha1.BootcNodePhaseReady:
 			nc.rebooting = append(nc.rebooting, bn)
@@ -115,6 +138,7 @@ func (r *BootcNodePoolReconciler) orchestrateRollout(
 		"staging", len(nc.staging),
 		"rebooting", len(nc.rebooting),
 		"rollingBack", len(nc.rollingBack),
+		"rolledBack", len(nc.rolledBack),
 		"errored", len(nc.errored),
 		"needsStaging", len(nc.needsStaging),
 	)
@@ -125,27 +149,43 @@ func (r *BootcNodePoolReconciler) orchestrateRollout(
 		return nil, err
 	}
 
-	// Step 2: If any nodes are errored, stop the rollout (degraded).
-	if len(nc.errored) > 0 {
+	// Step 2: Handle completed rollbacks -- nodes that were rolling
+	// back and are now Ready on the old image. Mark them as failed,
+	// uncordon them, and stop the rollout.
+	if err := r.handleCompletedRollbacks(ctx, nc.rolledBack, nodeMap, result); err != nil {
+		return nil, err
+	}
+
+	// Step 3: If any nodes are errored or rolled back, stop the
+	// rollout (degraded).
+	if len(nc.errored) > 0 || len(nc.rolledBack) > 0 {
 		log.Info("Rollout paused due to node errors",
-			"pool", pool.Name, "erroredNodes", len(nc.errored))
+			"pool", pool.Name, "erroredNodes", len(nc.errored),
+			"rolledBackNodes", len(nc.rolledBack))
 		return result, nil
 	}
 
-	// Step 3: If any nodes are rolling back, wait.
+	// Step 4: If any nodes are rolling back, wait.
 	if len(nc.rollingBack) > 0 {
 		result.requeue = true
 		return result, nil
 	}
 
-	// Step 4: If all nodes are ready at the desired image, rollout is
+	// Step 5: Check rebooting nodes for health check timeout. If a
+	// node has been rebooting longer than the timeout, trigger a
+	// rollback.
+	if err := r.checkRebootTimeouts(ctx, pool, nc.rebooting); err != nil {
+		return nil, err
+	}
+
+	// Step 6: If all nodes are ready at the desired image, rollout is
 	// complete.
 	if len(nc.readyAtDesired) == len(claimed) {
 		log.Info("Rollout complete", "pool", pool.Name)
 		return result, nil
 	}
 
-	// Step 5: Advance staged nodes to rebooting, respecting
+	// Step 7: Advance staged nodes to rebooting, respecting
 	// maxUnavailable.
 	maxUnavailable := max(pool.Spec.Rollout.MaxUnavailable, 1)
 	r.advanceStagedNodes(ctx, pool, &nc, nodeMap, maxUnavailable, result)
@@ -174,13 +214,136 @@ func (r *BootcNodePoolReconciler) uncordonReadyNodes(
 			result.nodesUncordoned++
 			log.Info("Uncordoned node after successful update", "node", node.Name)
 		}
-		// Reset the BootcNode's desiredPhase back to Staged to signal
+		// Reset the BootcNode's desiredPhase back to Staged and
+		// clear the rebooting-since annotation to signal
 		// completion.
+		needsUpdate := false
 		if bn.Spec.DesiredPhase != v1alpha1.BootcNodeDesiredPhaseStaged {
 			bn.Spec.DesiredPhase = v1alpha1.BootcNodeDesiredPhaseStaged
+			needsUpdate = true
+		}
+		if _, hasAnnotation := bn.Annotations[rebootingSinceAnnotation]; hasAnnotation {
+			delete(bn.Annotations, rebootingSinceAnnotation)
+			needsUpdate = true
+		}
+		if needsUpdate {
 			if err := r.Update(ctx, bn); err != nil {
 				return fmt.Errorf("resetting desiredPhase on %q: %w", bn.Name, err)
 			}
+		}
+	}
+	return nil
+}
+
+// checkRebootTimeouts checks rebooting nodes against the pool's health
+// check timeout. If a node has been rebooting for longer than the
+// timeout, the operator sets desiredPhase=RollingBack to trigger an
+// automatic rollback.
+func (r *BootcNodePoolReconciler) checkRebootTimeouts(
+	ctx context.Context,
+	pool *v1alpha1.BootcNodePool,
+	rebooting []*v1alpha1.BootcNode,
+) error {
+	log := logf.FromContext(ctx)
+	if len(rebooting) == 0 {
+		return nil
+	}
+
+	timeout := defaultHealthCheckTimeout
+	if pool.Spec.HealthCheck.Timeout.Duration > 0 {
+		timeout = pool.Spec.HealthCheck.Timeout.Duration
+	}
+
+	now := r.now()
+
+	for _, bn := range rebooting {
+		since, ok := bn.Annotations[rebootingSinceAnnotation]
+		if !ok {
+			// No annotation means the node was set to Rebooting
+			// before we started tracking timestamps. Set it now
+			// so we start the clock.
+			if bn.Annotations == nil {
+				bn.Annotations = make(map[string]string)
+			}
+			bn.Annotations[rebootingSinceAnnotation] = now.Format(time.RFC3339)
+			if err := r.Update(ctx, bn); err != nil {
+				log.Error(err, "Failed to set rebooting-since annotation", "bootcNode", bn.Name)
+			}
+			continue
+		}
+
+		rebootingSince, err := time.Parse(time.RFC3339, since)
+		if err != nil {
+			log.Error(err, "Failed to parse rebooting-since annotation", "bootcNode", bn.Name, "value", since)
+			continue
+		}
+
+		elapsed := now.Sub(rebootingSince)
+		if elapsed <= timeout {
+			continue
+		}
+
+		log.Info("Node exceeded health check timeout, triggering rollback",
+			"bootcNode", bn.Name,
+			"timeout", timeout,
+			"elapsed", elapsed)
+
+		bn.Spec.DesiredPhase = v1alpha1.BootcNodeDesiredPhaseRollingBack
+		if err := r.Update(ctx, bn); err != nil {
+			return fmt.Errorf("setting RollingBack on timed-out node %q: %w", bn.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// handleCompletedRollbacks processes nodes that have completed a
+// rollback: they were set to desiredPhase=RollingBack and are now
+// Ready on the old (non-desired) image. The operator uncordons them,
+// clears the rebooting-since annotation, and marks them as errored
+// so the pool enters Degraded state.
+func (r *BootcNodePoolReconciler) handleCompletedRollbacks(
+	ctx context.Context,
+	rolledBack []*v1alpha1.BootcNode,
+	nodeMap map[string]*corev1.Node,
+	result *rolloutResult,
+) error {
+	log := logf.FromContext(ctx)
+	for _, bn := range rolledBack {
+		log.Info("Node completed rollback, marking as failed",
+			"bootcNode", bn.Name,
+			"bootedImage", bn.Status.Booted.Image,
+			"desiredImage", bn.Spec.DesiredImage)
+
+		// Uncordon the node so it can serve workloads again.
+		if node, ok := nodeMap[bn.Name]; ok && node.Spec.Unschedulable {
+			if err := r.uncordonNode(ctx, node); err != nil {
+				return fmt.Errorf("uncordoning rolled-back node %q: %w", node.Name, err)
+			}
+			result.nodesUncordoned++
+		}
+
+		// Clear the rebooting-since annotation and reset
+		// desiredPhase to Staged. The node's error status (set
+		// below) will prevent the orchestrator from re-advancing
+		// it.
+		delete(bn.Annotations, rebootingSinceAnnotation)
+		bn.Spec.DesiredPhase = v1alpha1.BootcNodeDesiredPhaseStaged
+		if err := r.Update(ctx, bn); err != nil {
+			return fmt.Errorf("resetting rolled-back node %q: %w", bn.Name, err)
+		}
+
+		// Set the status to Error so the pool shows as Degraded.
+		// We must re-fetch to avoid conflicts since we just
+		// updated the spec.
+		fresh := &v1alpha1.BootcNode{}
+		if err := r.Get(ctx, client.ObjectKeyFromObject(bn), fresh); err != nil {
+			return fmt.Errorf("re-fetching rolled-back node %q: %w", bn.Name, err)
+		}
+		fresh.Status.Phase = v1alpha1.BootcNodePhaseError
+		fresh.Status.Message = fmt.Sprintf("Rollback completed: node returned to %s after health check timeout", bn.Status.Booted.Image)
+		if err := r.Status().Update(ctx, fresh); err != nil {
+			return fmt.Errorf("marking rolled-back node %q as errored: %w", bn.Name, err)
 		}
 	}
 	return nil
@@ -286,8 +449,13 @@ func (r *BootcNodePoolReconciler) advanceStagedNodes(
 		log.Info("Drained node for reboot", "node", node.Name)
 
 		// Set desiredPhase=Rebooting to tell the daemon to apply and
-		// reboot.
+		// reboot. Record the timestamp for health check timeout
+		// tracking.
 		bn.Spec.DesiredPhase = v1alpha1.BootcNodeDesiredPhaseRebooting
+		if bn.Annotations == nil {
+			bn.Annotations = make(map[string]string)
+		}
+		bn.Annotations[rebootingSinceAnnotation] = r.now().Format(time.RFC3339)
 		if err := r.Update(ctx, bn); err != nil {
 			log.Error(err, "Failed to advance BootcNode to Rebooting", "bootcNode", bn.Name)
 			continue
