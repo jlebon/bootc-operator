@@ -207,6 +207,12 @@ func (r *BootcNodePoolReconciler) uncordonReadyNodes(
 		if !ok {
 			continue
 		}
+
+		// Track whether this node just completed an update (was
+		// previously in Rebooting phase and is now ready at the
+		// desired image).
+		justCompleted := bn.Spec.DesiredPhase == v1alpha1.BootcNodeDesiredPhaseRebooting
+
 		if node.Spec.Unschedulable {
 			if err := r.uncordonNode(ctx, node); err != nil {
 				return fmt.Errorf("uncordoning node %q: %w", node.Name, err)
@@ -230,6 +236,11 @@ func (r *BootcNodePoolReconciler) uncordonReadyNodes(
 			if err := r.Update(ctx, bn); err != nil {
 				return fmt.Errorf("resetting desiredPhase on %q: %w", bn.Name, err)
 			}
+		}
+
+		if justCompleted {
+			r.recordEventf(bn, corev1.EventTypeNormal, eventReasonUpdateComplete,
+				"Node is now running desired image %s", bn.Status.Booted.Image)
 		}
 	}
 	return nil
@@ -292,6 +303,9 @@ func (r *BootcNodePoolReconciler) checkRebootTimeouts(
 		if err := r.Update(ctx, bn); err != nil {
 			return fmt.Errorf("setting RollingBack on timed-out node %q: %w", bn.Name, err)
 		}
+
+		r.recordEventf(bn, corev1.EventTypeWarning, eventReasonRollbackTriggered,
+			"Health check timeout exceeded (%s), triggering rollback", timeout)
 	}
 
 	return nil
@@ -345,6 +359,9 @@ func (r *BootcNodePoolReconciler) handleCompletedRollbacks(
 		if err := r.Status().Update(ctx, fresh); err != nil {
 			return fmt.Errorf("marking rolled-back node %q as errored: %w", bn.Name, err)
 		}
+
+		r.recordEventf(bn, corev1.EventTypeWarning, eventReasonRollbackComplete,
+			"Rollback completed: node returned to %s", bn.Status.Booted.Image)
 	}
 	return nil
 }
@@ -447,6 +464,8 @@ func (r *BootcNodePoolReconciler) advanceStagedNodes(
 			continue
 		}
 		log.Info("Drained node for reboot", "node", node.Name)
+		r.recordEventf(bn, corev1.EventTypeNormal, eventReasonNodeDrained,
+			"Node drained in preparation for reboot")
 
 		// Set desiredPhase=Rebooting to tell the daemon to apply and
 		// reboot. Record the timestamp for health check timeout
@@ -462,6 +481,9 @@ func (r *BootcNodePoolReconciler) advanceStagedNodes(
 		}
 		result.nodesAdvanced++
 		log.Info("Advanced node to Rebooting", "bootcNode", bn.Name)
+
+		r.recordEventf(bn, corev1.EventTypeNormal, eventReasonRebootInitiated,
+			"Reboot initiated to apply image %s", bn.Spec.DesiredImage)
 	}
 
 	if result.nodesAdvanced > 0 || len(nc.rebooting) > 0 || len(nc.staging) > 0 {

@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -60,13 +61,31 @@ const (
 	conditionTypeAvailable  = "Available"
 	conditionTypeProgessing = "Progressing"
 	conditionTypeDegraded   = "Degraded"
+
+	// Event reasons for BootcNodePool lifecycle transitions.
+	eventReasonRolloutStarted   = "RolloutStarted"
+	eventReasonStagingComplete  = "StagingComplete"
+	eventReasonRolloutComplete  = "RolloutComplete"
+	eventReasonRolloutDegraded  = "RolloutDegraded"
+	eventReasonNodeClaimed      = "NodeClaimed"
+	eventReasonNodeReleased     = "NodeReleased"
+	eventReasonOverlappingPools = "OverlappingPools"
+
+	// Event reasons for BootcNode lifecycle transitions.
+	eventReasonImageStaged       = "ImageStaged"
+	eventReasonRebootInitiated   = "RebootInitiated"
+	eventReasonUpdateComplete    = "UpdateComplete"
+	eventReasonRollbackTriggered = "RollbackTriggered"
+	eventReasonRollbackComplete  = "RollbackComplete"
+	eventReasonNodeDrained       = "NodeDrained"
 )
 
 // BootcNodePoolReconciler reconciles a BootcNodePool object
 type BootcNodePoolReconciler struct {
 	client.Client
-	Scheme  *runtime.Scheme
-	Drainer drain.Drainer
+	Scheme   *runtime.Scheme
+	Drainer  drain.Drainer
+	Recorder record.EventRecorder
 
 	// Now returns the current time. Defaults to time.Now. Override in
 	// tests to control time-dependent behavior (e.g. health check
@@ -81,6 +100,23 @@ func (r *BootcNodePoolReconciler) now() time.Time {
 		return r.Now()
 	}
 	return time.Now()
+}
+
+// recordEvent records an event on the given object if a Recorder is
+// configured. Safe to call when Recorder is nil (e.g. in tests that
+// don't set one up).
+func (r *BootcNodePoolReconciler) recordEvent(obj runtime.Object, eventType, reason, message string) {
+	if r.Recorder != nil {
+		r.Recorder.Event(obj, eventType, reason, message)
+	}
+}
+
+// recordEventf records a formatted event on the given object if a
+// Recorder is configured.
+func (r *BootcNodePoolReconciler) recordEventf(obj runtime.Object, eventType, reason, messageFmt string, args ...any) {
+	if r.Recorder != nil {
+		r.Recorder.Eventf(obj, eventType, reason, messageFmt, args...)
+	}
 }
 
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodepools,verbs=get;list;watch;create;update;patch;delete
@@ -174,7 +210,9 @@ func (r *BootcNodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// 9. Check for overlapping pools.
 	if overlapping := r.detectOverlaps(pool, matchingNodeNames, bootcNodeMap); overlapping != "" {
-		return r.setDegraded(ctx, pool, fmt.Sprintf("Node %q is already claimed by pool %q", overlapping, bootcNodeMap[overlapping].Labels[poolLabelKey]))
+		msg := fmt.Sprintf("Node %q is already claimed by pool %q", overlapping, bootcNodeMap[overlapping].Labels[poolLabelKey])
+		r.recordEvent(pool, corev1.EventTypeWarning, eventReasonOverlappingPools, msg)
+		return r.setDegraded(ctx, pool, msg)
 	}
 
 	// 10. Claim matching BootcNodes, release non-matching ones.
@@ -330,6 +368,8 @@ func (r *BootcNodePoolReconciler) syncClaims(ctx context.Context, pool *v1alpha1
 // if already correctly claimed.
 func (r *BootcNodePoolReconciler) claimBootcNode(ctx context.Context, pool *v1alpha1.BootcNodePool, bn *v1alpha1.BootcNode, desiredImage string) error {
 	needsUpdate := false
+	isNewClaim := false
+	imageChanged := false
 
 	// Ensure pool label is set.
 	if bn.Labels == nil {
@@ -338,10 +378,14 @@ func (r *BootcNodePoolReconciler) claimBootcNode(ctx context.Context, pool *v1al
 	if bn.Labels[poolLabelKey] != pool.Name {
 		bn.Labels[poolLabelKey] = pool.Name
 		needsUpdate = true
+		isNewClaim = true
 	}
 
 	// Set spec fields.
 	if bn.Spec.DesiredImage != desiredImage {
+		if bn.Spec.DesiredImage != "" {
+			imageChanged = true
+		}
 		bn.Spec.DesiredImage = desiredImage
 		needsUpdate = true
 	}
@@ -365,7 +409,18 @@ func (r *BootcNodePoolReconciler) claimBootcNode(ctx context.Context, pool *v1al
 		return nil
 	}
 
-	return r.Update(ctx, bn)
+	if err := r.Update(ctx, bn); err != nil {
+		return err
+	}
+
+	if isNewClaim {
+		r.recordEventf(pool, corev1.EventTypeNormal, eventReasonNodeClaimed, "Claimed node %q for pool", bn.Name)
+	}
+	if imageChanged {
+		r.recordEventf(pool, corev1.EventTypeNormal, eventReasonRolloutStarted, "Starting rollout of %s to node %q", desiredImage, bn.Name)
+	}
+
+	return nil
 }
 
 // desiredPhaseForNode determines the correct desiredPhase for a
@@ -388,7 +443,9 @@ func desiredPhaseForNode(bn *v1alpha1.BootcNode) v1alpha1.BootcNodeDesiredPhase 
 func (r *BootcNodePoolReconciler) releaseBootcNode(ctx context.Context, bn *v1alpha1.BootcNode) error {
 	needsUpdate := false
 
+	poolName := ""
 	if bn.Labels != nil && bn.Labels[poolLabelKey] != "" {
+		poolName = bn.Labels[poolLabelKey]
 		delete(bn.Labels, poolLabelKey)
 		needsUpdate = true
 	}
@@ -402,7 +459,18 @@ func (r *BootcNodePoolReconciler) releaseBootcNode(ctx context.Context, bn *v1al
 		return nil
 	}
 
-	return r.Update(ctx, bn)
+	if err := r.Update(ctx, bn); err != nil {
+		return err
+	}
+
+	// Record the release event on the BootcNode. We can't record it
+	// on the pool since we may not have a reference to it here, but
+	// the event references the pool name in the message.
+	if poolName != "" {
+		r.recordEventf(bn, corev1.EventTypeNormal, eventReasonNodeReleased, "Released from pool %q", poolName)
+	}
+
+	return nil
 }
 
 // resolveImage extracts the image digest from an image reference. For
@@ -415,12 +483,15 @@ func resolveImage(imageRef string) string {
 }
 
 // updateStatus re-fetches the pool, computes status from the claimed
-// BootcNodes, and updates the status subresource.
+// BootcNodes, and updates the status subresource. It also emits events
+// for significant phase transitions.
 func (r *BootcNodePoolReconciler) updateStatus(ctx context.Context, key types.NamespacedName, pool *v1alpha1.BootcNodePool, desiredImage string, claimed []*v1alpha1.BootcNode, targetNodes int32) error {
 	// Re-fetch before status update to avoid "object modified" errors.
 	if err := r.Get(ctx, key, pool); err != nil {
 		return err
 	}
+
+	previousPhase := pool.Status.Phase
 
 	pool.Status.ObservedGeneration = pool.Generation
 	pool.Status.TargetNodes = targetNodes
@@ -459,7 +530,39 @@ func (r *BootcNodePoolReconciler) updateStatus(ctx context.Context, key types.Na
 	// Update conditions.
 	updateConditions(pool, claimed)
 
+	// Emit events for significant phase transitions.
+	r.emitPhaseTransitionEvents(pool, previousPhase, desiredImage)
+
 	return r.Status().Update(ctx, pool)
+}
+
+// emitPhaseTransitionEvents records events on the pool when the phase
+// changes to a significant state. Only transition boundaries emit
+// events to avoid noise on every reconciliation.
+func (r *BootcNodePoolReconciler) emitPhaseTransitionEvents(pool *v1alpha1.BootcNodePool, previousPhase v1alpha1.BootcNodePoolPhase, desiredImage string) {
+	newPhase := pool.Status.Phase
+	if newPhase == previousPhase {
+		return
+	}
+
+	switch newPhase {
+	case v1alpha1.BootcNodePoolPhaseStaging:
+		if previousPhase == v1alpha1.BootcNodePoolPhaseReady || previousPhase == v1alpha1.BootcNodePoolPhaseIdle || previousPhase == "" {
+			r.recordEventf(pool, corev1.EventTypeNormal, eventReasonRolloutStarted,
+				"Started rollout of image %s to %d nodes", desiredImage, pool.Status.TargetNodes)
+		}
+	case v1alpha1.BootcNodePoolPhaseRolling:
+		if previousPhase == v1alpha1.BootcNodePoolPhaseStaging {
+			r.recordEventf(pool, corev1.EventTypeNormal, eventReasonStagingComplete,
+				"All %d nodes staged, starting rolling reboots", pool.Status.StagedNodes+pool.Status.UpdatingNodes)
+		}
+	case v1alpha1.BootcNodePoolPhaseReady:
+		r.recordEventf(pool, corev1.EventTypeNormal, eventReasonRolloutComplete,
+			"Rollout complete: all %d nodes running %s", pool.Status.ReadyNodes, desiredImage)
+	case v1alpha1.BootcNodePoolPhaseDegraded:
+		r.recordEvent(pool, corev1.EventTypeWarning, eventReasonRolloutDegraded,
+			"Rollout paused: one or more nodes failed to update")
+	}
 }
 
 // computePhase determines the overall pool phase from node states.

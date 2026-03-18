@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -27,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -100,6 +102,48 @@ func reconcilePoolWithOpts(ctx context.Context, name string, now func() time.Tim
 	return reconciler.Reconcile(ctx, reconcile.Request{
 		NamespacedName: types.NamespacedName{Name: name},
 	})
+}
+
+// reconcilePoolWithRecorder runs one reconciliation cycle with a fake
+// event recorder and returns the recorder (for event assertions) and
+// any error.
+func reconcilePoolWithRecorder(ctx context.Context, name string) (*record.FakeRecorder, error) {
+	recorder := record.NewFakeRecorder(20)
+	reconciler := &BootcNodePoolReconciler{
+		Client:   k8sClient,
+		Scheme:   k8sClient.Scheme(),
+		Recorder: recorder,
+	}
+	_, err := reconciler.Reconcile(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: name},
+	})
+	return recorder, err
+}
+
+// drainEvents reads all events from a FakeRecorder's channel and
+// returns them as a slice of strings. Each string has the format
+// "<type> <reason> <message>".
+func drainEvents(recorder *record.FakeRecorder) []string {
+	var events []string
+	for {
+		select {
+		case event := <-recorder.Events:
+			events = append(events, event)
+		default:
+			return events
+		}
+	}
+}
+
+// hasEvent checks whether any event in the slice contains the given
+// reason substring and message substring.
+func hasEvent(events []string, reason, messageSubstr string) bool {
+	for _, e := range events {
+		if strings.Contains(e, reason) && strings.Contains(e, messageSubstr) {
+			return true
+		}
+	}
+	return false
 }
 
 // getPool fetches the latest version of a BootcNodePool.
@@ -1518,6 +1562,344 @@ var _ = Describe("BootcNodePool Controller", func() {
 			// re-stage. The desiredPhase is preserved as Rebooting
 			// because desiredPhaseForNode preserves it, but the daemon
 			// will detect the image mismatch and re-stage.
+		})
+	})
+
+	Context("Events", func() {
+		It("should emit RolloutStarted when pool transitions from Idle to Staging", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			recorder, err := reconcilePoolWithRecorder(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents(recorder)
+			Expect(hasEvent(events, eventReasonRolloutStarted, testImage)).To(BeTrue(),
+				"expected RolloutStarted event, got: %v", events)
+			Expect(hasEvent(events, eventReasonNodeClaimed, nodeName1)).To(BeTrue(),
+				"expected NodeClaimed event, got: %v", events)
+		})
+
+		It("should emit RebootInitiated when node is advanced to Rebooting", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			recorder, err := reconcilePoolWithRecorder(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents(recorder)
+			Expect(hasEvent(events, eventReasonRebootInitiated, testImage)).To(BeTrue(),
+				"expected RebootInitiated event, got: %v", events)
+			Expect(hasEvent(events, eventReasonNodeDrained, "drained")).To(BeTrue(),
+				"expected NodeDrained event, got: %v", events)
+		})
+
+		It("should emit UpdateComplete when node reboots into desired image", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			createBootcNode(ctx, nodeName1, node)
+
+			// Simulate the node was advanced to Rebooting and
+			// cordoned in a previous reconcile.
+			node.Spec.Unschedulable = true
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// First reconcile to set up claims.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Now simulate the node completed the reboot: it's
+			// running the desired image with desiredPhase=Rebooting.
+			bn := getBootcNode(ctx, nodeName1)
+			bn.Spec.DesiredPhase = v1alpha1.BootcNodeDesiredPhaseRebooting
+			bn.Annotations = map[string]string{
+				rebootingSinceAnnotation: time.Now().Format(time.RFC3339),
+			}
+			Expect(k8sClient.Update(ctx, bn)).To(Succeed())
+
+			bn = getBootcNode(ctx, nodeName1)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseReady
+			bn.Status.Booted.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			recorder, err := reconcilePoolWithRecorder(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents(recorder)
+			Expect(hasEvent(events, eventReasonUpdateComplete, testImage)).To(BeTrue(),
+				"expected UpdateComplete event, got: %v", events)
+		})
+
+		It("should emit RolloutComplete when all nodes are at desired image", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// First reconcile to set up claims and get past Idle.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate the node is already running the desired image.
+			bn := getBootcNode(ctx, nodeName1)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseReady
+			bn.Status.Booted.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Need to get the pool into a non-Ready phase first so
+			// the transition to Ready triggers the event.
+			pool := getPool(ctx, poolName)
+			pool.Status.Phase = v1alpha1.BootcNodePoolPhaseStaging
+			Expect(k8sClient.Status().Update(ctx, pool)).To(Succeed())
+
+			recorder, err := reconcilePoolWithRecorder(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents(recorder)
+			Expect(hasEvent(events, eventReasonRolloutComplete, "all")).To(BeTrue(),
+				"expected RolloutComplete event, got: %v", events)
+		})
+
+		It("should emit RolloutDegraded when a node enters error state", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseError
+			bn.Status.Message = "bootc switch failed"
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// First reconcile to get past Idle.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Force the pool to be in a non-Degraded phase so the
+			// transition triggers the event.
+			pool := getPool(ctx, poolName)
+			pool.Status.Phase = v1alpha1.BootcNodePoolPhaseStaging
+			Expect(k8sClient.Status().Update(ctx, pool)).To(Succeed())
+
+			recorder, err := reconcilePoolWithRecorder(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents(recorder)
+			Expect(hasEvent(events, eventReasonRolloutDegraded, "failed")).To(BeTrue(),
+				"expected RolloutDegraded event, got: %v", events)
+		})
+
+		It("should emit RollbackTriggered when health check timeout exceeded", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+				HealthCheck: v1alpha1.HealthCheckConfig{
+					Timeout: metav1.Duration{Duration: 2 * time.Minute},
+				},
+			})
+
+			// First reconcile to claim the node.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate the node is rebooting with a timestamp far
+			// enough in the past to trigger the timeout.
+			bn := getBootcNode(ctx, nodeName1)
+			bn.Spec.DesiredPhase = v1alpha1.BootcNodeDesiredPhaseRebooting
+			pastTime := time.Now().Add(-3 * time.Minute)
+			bn.Annotations = map[string]string{
+				rebootingSinceAnnotation: pastTime.Format(time.RFC3339),
+			}
+			Expect(k8sClient.Update(ctx, bn)).To(Succeed())
+
+			bn = getBootcNode(ctx, nodeName1)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseRebooting
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			recorder, err := reconcilePoolWithRecorder(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents(recorder)
+			Expect(hasEvent(events, eventReasonRollbackTriggered, "timeout")).To(BeTrue(),
+				"expected RollbackTriggered event, got: %v", events)
+		})
+
+		It("should emit OverlappingPools when a node is claimed by two pools", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+
+			// Claim the node by pool-a.
+			bn.Labels = map[string]string{poolLabelKey: "pool-a"}
+			Expect(k8sClient.Update(ctx, bn)).To(Succeed())
+
+			// Create pool-b that also matches the node.
+			createPool(ctx, "pool-b", v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			recorder, err := reconcilePoolWithRecorder(ctx, "pool-b")
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents(recorder)
+			Expect(hasEvent(events, eventReasonOverlappingPools, "pool-a")).To(BeTrue(),
+				"expected OverlappingPools event, got: %v", events)
+		})
+
+		It("should emit NodeReleased when a node is released from a pool", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// First reconcile to claim the node.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			bn := getBootcNode(ctx, nodeName1)
+			Expect(bn.Labels[poolLabelKey]).To(Equal(poolName))
+
+			// Change the node selector so the node no longer matches.
+			pool := getPool(ctx, poolName)
+			pool.Spec.NodeSelector = &metav1.LabelSelector{
+				MatchLabels: map[string]string{"role": "control-plane"},
+			}
+			Expect(k8sClient.Update(ctx, pool)).To(Succeed())
+
+			recorder, err := reconcilePoolWithRecorder(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents(recorder)
+			Expect(hasEvent(events, eventReasonNodeReleased, poolName)).To(BeTrue(),
+				"expected NodeReleased event, got: %v", events)
+		})
+
+		It("should emit RollbackComplete when rollback finishes", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// First reconcile to claim the node.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate the node completed a rollback: it was set to
+			// RollingBack and is now Ready on the old image.
+			bn := getBootcNode(ctx, nodeName1)
+			bn.Spec.DesiredPhase = v1alpha1.BootcNodeDesiredPhaseRollingBack
+			bn.Annotations = map[string]string{
+				rebootingSinceAnnotation: time.Now().Add(-10 * time.Minute).Format(time.RFC3339),
+			}
+			Expect(k8sClient.Update(ctx, bn)).To(Succeed())
+
+			bn = getBootcNode(ctx, nodeName1)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseReady
+			bn.Status.Booted.Image = "quay.io/example/old-image@sha256:olddigest"
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			recorder, err := reconcilePoolWithRecorder(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents(recorder)
+			Expect(hasEvent(events, eventReasonRollbackComplete, "Rollback completed")).To(BeTrue(),
+				"expected RollbackComplete event, got: %v", events)
+		})
+
+		It("should not emit RolloutStarted when pool is already in Staging phase", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// First reconcile to get into Staging.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			pool := getPool(ctx, poolName)
+			Expect(pool.Status.Phase).To(Equal(v1alpha1.BootcNodePoolPhaseStaging))
+
+			// Second reconcile should not emit RolloutStarted again
+			// (phase is already Staging).
+			recorder, err := reconcilePoolWithRecorder(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			events := drainEvents(recorder)
+			Expect(hasEvent(events, eventReasonRolloutStarted, "")).To(BeFalse(),
+				"did not expect RolloutStarted event on re-reconcile, got: %v", events)
 		})
 	})
 })

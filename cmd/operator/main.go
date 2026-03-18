@@ -198,6 +198,8 @@ func main() {
 		Client:  mgr.GetClient(),
 		Scheme:  mgr.GetScheme(),
 		Drainer: drainer,
+		//nolint:staticcheck // TODO: migrate to events.EventRecorder
+		Recorder: mgr.GetEventRecorderFor("bootcnodepool-controller"),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "BootcNodePool")
 		os.Exit(1)
