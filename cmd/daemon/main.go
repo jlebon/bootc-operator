@@ -23,8 +23,14 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/klog/v2"
+
+	"github.com/jlebon/bootc-operator/internal/daemon"
+	"github.com/jlebon/bootc-operator/pkg/bootc"
 )
 
 func main() {
@@ -51,12 +57,44 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
-	// TODO: Initialize client-go rest.Config (in-cluster or from kubeconfig)
-	// TODO: Initialize bootc client
-	// TODO: Check if host is a bootc system
-	// TODO: Create BootcNode CRD if it doesn't exist
-	// TODO: Start poll loop
+	// Initialize client-go rest.Config (in-cluster or from kubeconfig).
+	config, err := buildConfig(kubeconfig)
+	if err != nil {
+		klog.ErrorS(err, "Failed to build Kubernetes client config")
+		os.Exit(1)
+	}
 
-	<-ctx.Done()
+	// Initialize Kubernetes client for BootcNode and Node operations.
+	kubeClient, err := daemon.NewKubeClient(config)
+	if err != nil {
+		klog.ErrorS(err, "Failed to create Kubernetes client")
+		os.Exit(1)
+	}
+
+	// Initialize bootc client (uses nsenter to execute commands on the host).
+	bootcClient := bootc.NewClient()
+
+	// Create and run the daemon.
+	d := daemon.NewDaemon(
+		nodeName,
+		time.Duration(pollInterval)*time.Second,
+		kubeClient,
+		bootcClient,
+	)
+
+	if err := d.Run(ctx); err != nil {
+		klog.ErrorS(err, "Daemon exited with error")
+		os.Exit(1)
+	}
+
 	klog.InfoS("Shutting down bootc-daemon")
+}
+
+// buildConfig creates a rest.Config from the given kubeconfig path, or
+// falls back to in-cluster config if kubeconfig is empty.
+func buildConfig(kubeconfig string) (*rest.Config, error) {
+	if kubeconfig != "" {
+		return clientcmd.BuildConfigFromFlags("", kubeconfig)
+	}
+	return rest.InClusterConfig()
 }

@@ -1035,7 +1035,7 @@ execute bootc commands on the host via nsenter.
 
 `cmd/daemon/main.go` + `internal/daemon/` -- the per-node agent.
 
-- [ ] `internal/daemon/daemon.go`: `Daemon` struct and main loop:
+- [x] `internal/daemon/daemon.go`: `Daemon` struct and main loop:
       - On startup: call `bootcClient.IsBootcHost()`. If false, log and
         stay idle (sleep forever).
       - On startup (bootc host): create BootcNode CRD if it doesn't
@@ -1053,22 +1053,36 @@ execute bootc commands on the host via nsenter.
           - If not staged → determine switch vs upgrade, execute, set
             phase=Staging then Staged
         - `spec.desiredPhase=Rebooting`:
-          - Write auth file if pull secret is mounted
+          - Verify image is staged before rebooting
           - Run `bootc upgrade --from-downloaded --apply
             [--soft-reboot=auto]`
           - (node reboots; daemon restarts; next poll reports new status)
         - `spec.desiredPhase=RollingBack`:
           - Run `bootc rollback --apply`
           - (node reboots)
-- [ ] `internal/daemon/bootc.go`: wiring between daemon state machine and
-      `pkg/bootc/` client
-- [ ] `internal/daemon/reboot.go`: reboot execution (nsenter systemctl
-      reboot, or bootc --apply handles it)
-- [ ] `cmd/daemon/main.go`: entrypoint. Parse flags (`--node-name` from
+      - `needsSwitch()` helper determines `bootc switch` vs `bootc
+        upgrade --download-only` by comparing image repositories
+      - `shouldSoftReboot()` helper checks reboot policy + staged
+        deployment capability
+- [x] `internal/daemon/kubeclient.go`: KubeClient interface implementation
+      using client-go REST client for BootcNode operations and typed
+      clientset for Node operations. Separate from controller-runtime
+      (no informers, no watches).
+- [x] `internal/daemon/bootc.go`: NOT NEEDED as separate file. The
+      daemon directly uses `pkg/bootc.Client` interface and the
+      `pkg/bootc.ToBootcNodeStatus`/`StagedImageRef`/`BootedImageRef`
+      helpers. The wiring is inline in `daemon.go`.
+- [x] `internal/daemon/reboot.go`: NOT NEEDED as separate file. Reboots
+      are handled by `bootc upgrade --from-downloaded --apply` and
+      `bootc rollback --apply` which both trigger reboots directly.
+      No separate `nsenter systemctl reboot` is needed.
+- [x] `cmd/daemon/main.go`: entrypoint. Parse flags (`--node-name` from
       downward API env var, `--poll-interval`, `--kubeconfig`). Create
       client-go rest.Config (in-cluster). Instantiate Daemon, run loop.
-- [ ] Unit tests: mock bootc client interface, test state machine
-      transitions
+- [x] Unit tests: mock bootc client and KubeClient interfaces, test
+      state machine transitions (20 tests covering all phases, error
+      handling, soft reboot policy, image repo switching, BootcNode
+      creation). Coverage: 57.2%.
 
 ### 5. BootcNodePool reconciler
 
