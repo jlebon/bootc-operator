@@ -5,9 +5,27 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - bootc.dev
   resources:
   - bootcnodepools
+  - bootcnodes
   verbs:
   - create
   - delete
@@ -26,6 +44,7 @@ rules:
   - bootc.dev
   resources:
   - bootcnodepools/status
+  - bootcnodes/status
   verbs:
   - get
   - patch

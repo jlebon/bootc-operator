@@ -1088,17 +1088,18 @@ execute bootc commands on the host via nsenter.
 
 `internal/controller/bootcnodepool_controller.go` -- the main reconciler.
 
-- [ ] Reconcile function (kubebuilder deploy-image pattern):
+- [x] Reconcile function (kubebuilder deploy-image pattern):
       1. Fetch BootcNodePool CR
       2. If not found → return
       3. Initialize status conditions if empty (Available, Progressing,
          Degraded → Unknown)
       4. Add finalizer (`bootc.dev/cleanup`) if not present
       5. Handle deletion (DeletionTimestamp set):
-         - Uncordon any drained nodes
          - Release all claimed BootcNodes (clear spec + pool label)
          - Remove finalizer
-      6. Resolve image tag → digest (go-containerregistry)
+         - (Uncordoning drained nodes deferred to rollout orchestration)
+      6. Resolve image reference (MVP: pass-through; full digest
+         resolution via go-containerregistry deferred)
       7. List BootcNodes; match against pool's nodeSelector by looking up
          each BootcNode's corresponding Node
       8. Overlapping pool detection: if a matching BootcNode is already
@@ -1106,15 +1107,20 @@ execute bootc commands on the host via nsenter.
       9. Claim matching BootcNodes (set spec.desiredImage,
          spec.desiredPhase=Staged, add `bootc.dev/pool` label)
       10. Release non-matching BootcNodes (clear spec + pool label)
-      11. Orchestrate rollout (delegate to rollout.go)
+      11. Orchestrate rollout (deferred to item 6 -- rollout.go)
       12. Re-fetch CR before status update
       13. Update status (phase, counters, conditions)
-      14. Return with RequeueAfter for periodic tag re-resolution
-- [ ] `SetupWithManager`: `For(BootcNodePool)`,
+      14. Return with RequeueAfter for periodic re-resolution (5m)
+- [x] `SetupWithManager`: `For(BootcNodePool)`,
       `Watches(BootcNode, findPoolsForBootcNode)`,
       `Watches(Node, findPoolsForNode)`
-- [ ] RBAC markers (bootcnodepools, bootcnodes, nodes, pods, pods/eviction,
-      events)
+- [x] RBAC markers (bootcnodepools, bootcnodes, nodes, events).
+      pods/pods/eviction RBAC deferred to drain manager (item 7).
+- [x] Integration tests (envtest): 15 tests covering condition init,
+      finalizer, deletion cleanup, node claiming/releasing, overlap
+      detection, status counters/phases, nodeSelector changes, image
+      updates, idempotent reconciliation, observedGeneration. Controller
+      coverage: 73.7%.
 - [ ] Deploy daemon DaemonSet: reconcile the DaemonSet as an owned resource
       (create/update from `DAEMON_IMAGE` env var)
 - [ ] Digest resolution: `internal/controller/digest.go` using
