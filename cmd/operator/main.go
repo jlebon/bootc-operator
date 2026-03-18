@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -32,6 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/metrics/filters"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
@@ -200,6 +202,54 @@ func main() {
 		setupLog.Error(err, "Failed to create controller", "controller", "BootcNodePool")
 		os.Exit(1)
 	}
+
+	// Set up the DaemonSet reconciler to manage the bootc-daemon
+	// DaemonSet. The daemon image is read from the DAEMON_IMAGE env
+	// var (set on the operator Deployment during installation). The
+	// operator namespace is read from the POD_NAMESPACE env var
+	// (standard downward API) or falls back to the namespace in the
+	// service account file.
+	daemonImage := os.Getenv("DAEMON_IMAGE")
+	if daemonImage == "" {
+		setupLog.Info("DAEMON_IMAGE not set, skipping daemon DaemonSet management")
+	} else {
+		operatorNamespace := os.Getenv("POD_NAMESPACE")
+		if operatorNamespace == "" {
+			// Fall back to reading the namespace from the service
+			// account mounted by the kubelet. This is the standard
+			// way to determine the namespace when running in-cluster.
+			nsBytes, readErr := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+			if readErr != nil {
+				setupLog.Info("Could not determine operator namespace, defaulting to bootc-operator-system")
+				operatorNamespace = "bootc-operator-system"
+			} else {
+				operatorNamespace = string(nsBytes)
+			}
+		}
+
+		dsReconciler := &controller.DaemonSetReconciler{
+			Client:      mgr.GetClient(),
+			Scheme:      mgr.GetScheme(),
+			DaemonImage: daemonImage,
+			Namespace:   operatorNamespace,
+		}
+
+		if err := dsReconciler.SetupWithManager(mgr); err != nil {
+			setupLog.Error(err, "Failed to create controller", "controller", "DaemonSet")
+			os.Exit(1)
+		}
+
+		// Bootstrap daemon resources at startup so they exist before
+		// any BootcNodePool is created. This runs after the manager's
+		// cache is started (via a Runnable).
+		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			return dsReconciler.EnsureDaemonResources(ctx)
+		})); err != nil {
+			setupLog.Error(err, "Failed to add daemon bootstrap runnable")
+			os.Exit(1)
+		}
+	}
+
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

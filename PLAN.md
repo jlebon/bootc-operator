@@ -1121,8 +1121,22 @@ execute bootc commands on the host via nsenter.
       detection, status counters/phases, nodeSelector changes, image
       updates, idempotent reconciliation, observedGeneration. Controller
       coverage: 73.7%.
-- [ ] Deploy daemon DaemonSet: reconcile the DaemonSet as an owned resource
-      (create/update from `DAEMON_IMAGE` env var)
+- [x] Deploy daemon DaemonSet: reconcile the DaemonSet as an owned resource
+      (create/update from `DAEMON_IMAGE` env var).
+      `internal/controller/daemonset.go`: `DaemonSetReconciler` watches
+      the daemon DaemonSet and ensures it matches the desired state.
+      Creates/updates DaemonSet, ServiceAccount, ClusterRole, and
+      ClusterRoleBinding. Image comes from `DAEMON_IMAGE` env var on
+      the operator Deployment. `EnsureDaemonResources()` bootstraps
+      resources at startup via a manager Runnable. RBAC markers generate
+      permissions for `apps/daemonsets`, `serviceaccounts`,
+      `rbac.authorization.k8s.io/clusterroles`, and
+      `rbac.authorization.k8s.io/clusterrolebindings`. Operator's
+      `config/manager/manager.yaml` updated with `DAEMON_IMAGE` and
+      `POD_NAMESPACE` env vars. 10 integration tests covering resource
+      creation, idempotency, image updates, spec correctness (node
+      affinity, tolerations, hostPID, privileged, NODE_NAME env),
+      and ClusterRole drift repair. Controller coverage: 78.1%.
 - [ ] Digest resolution: `internal/controller/digest.go` using
       `go-containerregistry` (`remote.Image`, `remote.Head`), with optional
       auth from `imagePullSecret`
