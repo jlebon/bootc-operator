@@ -1,2 +1,7 @@
 /.opencode/plans
 /tests/results/
+
+# Build artifacts
+/bin/
+cover.out
+dist/

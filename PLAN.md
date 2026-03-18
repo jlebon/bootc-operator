@@ -951,31 +951,31 @@ with elevated privileges (`hostPID: true`, `privileged: true`).
 Set up the kubebuilder project structure and extend it for the dual-binary
 (operator + daemon) layout.
 
-- [ ] `kubebuilder init --domain bootc.dev --repo github.com/jlebon/bootc-operator`
-- [ ] `kubebuilder create api --group "" --version v1alpha1 --kind BootcNodePool`
+- [x] `kubebuilder init --domain bootc.dev --repo github.com/jlebon/bootc-operator`
+- [x] `kubebuilder create api --group "" --version v1alpha1 --kind BootcNodePool`
       (yes to both Resource and Controller)
-- [ ] `kubebuilder create api --group "" --version v1alpha1 --kind BootcNode`
+- [x] `kubebuilder create api --group "" --version v1alpha1 --kind BootcNode`
       (yes to Resource, no to Controller -- the operator watches it but the
       daemon creates it)
-- [ ] Move `cmd/main.go` → `cmd/operator/main.go`; update `Makefile` to
+- [x] Move `cmd/main.go` → `cmd/operator/main.go`; update `Makefile` to
       build from `cmd/operator/`
-- [ ] Create `cmd/daemon/main.go` stub (flag parsing, client-go setup,
+- [x] Create `cmd/daemon/main.go` stub (flag parsing, client-go setup,
       placeholder poll loop)
-- [ ] Add `Makefile` targets: `build-daemon`, `docker-build-daemon`
-- [ ] Create multi-target `Dockerfile` (operator + daemon stages, both
+- [x] Add `Makefile` targets: `build-daemon`, `docker-build-daemon`
+- [x] Create multi-target `Dockerfile` (operator + daemon stages, both
       distroless; daemon includes nsenter)
-- [ ] Create `config/daemon/` directory with:
+- [x] Create `config/daemon/` directory with:
       - `daemonset.yaml` (`hostPID: true`, `privileged: true`,
         `nodeAffinity` with `DoesNotExist` on `node.bootc.dev/skip`,
         nsenter binary included)
       - `service_account.yaml`
       - `kustomization.yaml`
-- [ ] Create daemon RBAC in `config/rbac/`:
+- [x] Create daemon RBAC in `config/rbac/`:
       - `daemon_role.yaml` (ClusterRole: `get`/`create`/`update` on
         `bootcnodes`, `get` on `nodes`)
       - `daemon_role_binding.yaml`
-- [ ] Wire `config/default/kustomization.yaml` to include daemon resources
-- [ ] Verify `make manifests generate build` passes
+- [x] Wire `config/default/kustomization.yaml` to include daemon resources
+- [x] Verify `make manifests generate build` passes
 
 ### 2. CRD types
 

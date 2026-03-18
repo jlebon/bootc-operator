@@ -1,0 +1,29 @@
+# Daemon ClusterRole: manually managed (not generated from kubebuilder markers).
+# The daemon needs to create its own BootcNode CRD on startup and update it
+# periodically with status. It also reads Node objects to set ownerReferences.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: daemon-role
+rules:
+- apiGroups:
+  - bootc.dev
+  resources:
+  - bootcnodes
+  verbs:
+  - get
+  - create
+  - update
+- apiGroups:
+  - bootc.dev
+  resources:
+  - bootcnodes/status
+  verbs:
+  - get
+  - update
+- apiGroups:
+  - ""
+  resources:
+  - nodes
+  verbs:
+  - get
