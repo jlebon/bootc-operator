@@ -1007,25 +1007,29 @@ conventions.
 `pkg/bootc/` -- Go wrapper for the bootc CLI. Used by the daemon to
 execute bootc commands on the host via nsenter.
 
-- [ ] `pkg/bootc/types.go`: Go types matching the `org.containers.bootc/v1`
+- [x] `pkg/bootc/types.go`: Go types matching the `org.containers.bootc/v1`
       BootcHost JSON schema (booted/staged/rollback deployments, image refs,
       versions, timestamps, softRebootCapable)
-- [ ] `pkg/bootc/client.go`: `BootcClient` struct with methods:
-      - `NewBootcClient(nsenterPath string)` constructor
-      - `Status() (*BootcHost, error)` -- runs `bootc status --json`, parses
-      - `Switch(image string) error` -- runs `bootc switch <image>`
-      - `UpgradeDownloadOnly() error` -- runs `bootc upgrade --download-only`
-      - `UpgradeApply(softReboot bool) error` -- runs `bootc upgrade
+- [x] `pkg/bootc/client.go`: `Client` interface + implementation with methods:
+      - `NewClient()` constructor (uses nsenterRunner)
+      - `NewClientWithRunner(runner)` for testing
+      - `Status(ctx) (*Host, error)` -- runs `bootc status --json`, parses
+      - `Switch(ctx, image) error` -- runs `bootc switch <image>`
+      - `UpgradeDownloadOnly(ctx) error` -- runs `bootc upgrade --download-only`
+      - `UpgradeApply(ctx, softReboot) error` -- runs `bootc upgrade
         --from-downloaded [--soft-reboot=auto] --apply`
-      - `Rollback(apply bool) error` -- runs `bootc rollback [--apply]`
-      - `IsBootcHost() bool` -- returns true if bootc is available
-      - Internal: `nsenterExec(args ...string)` helper that prefixes
-        commands with `nsenter -t 1 -m --`
-- [ ] `pkg/bootc/auth.go`: `WriteAuthFile(secret []byte) error` -- writes
-      dockerconfigjson to `/run/ostree/auth.json` on the host via nsenter
-- [ ] `pkg/bootc/status.go`: JSON parsing logic, mapping BootcHost fields
-      to our `BootEntryStatus` API type
-- [ ] Unit tests for JSON parsing (mock `bootc status --json` output)
+      - `Rollback(ctx, apply) error` -- runs `bootc rollback [--apply]`
+      - `IsBootcHost(ctx) bool` -- returns true if bootc is available
+      - `CommandRunner` interface for testability (nsenterRunner default)
+- [x] `pkg/bootc/auth.go`: `WriteAuthFile(ctx, runner, data)` -- writes
+      dockerconfigjson to `/run/ostree/auth.json` on the host via nsenter;
+      `RemoveAuthFile(ctx, runner)` for cleanup
+- [x] `pkg/bootc/status.go`: JSON parsing logic, mapping BootcHost fields
+      to our `BootEntryStatus` API type. Helper functions:
+      `ToBootEntryStatus`, `ToBootcNodeStatus`, `HasStagedImage`,
+      `StagedImageRef`, `BootedImageRef`, `IsDownloadOnly`
+- [x] Unit tests for JSON parsing (mock `bootc status --json` output),
+      client commands, and status mapping (24 tests, 78.8% coverage)
 
 ### 4. Daemon
 

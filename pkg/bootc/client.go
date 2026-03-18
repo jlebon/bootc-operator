@@ -1,0 +1,144 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package bootc
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os/exec"
+)
+
+// Client defines the interface for interacting with the bootc CLI on a
+// host. All methods execute commands in PID 1's mount namespace via
+// nsenter so that bootc sees the host filesystem (ostree repo, container
+// storage, boot loader config).
+type Client interface {
+	// IsBootcHost returns true if bootc is available on the host.
+	IsBootcHost(ctx context.Context) bool
+
+	// Status runs `bootc status --json` and returns the parsed host state.
+	Status(ctx context.Context) (*Host, error)
+
+	// Switch runs `bootc switch <image>` to change the tracked image.
+	// This downloads and stages the new image without rebooting.
+	Switch(ctx context.Context, image string) error
+
+	// UpgradeDownloadOnly runs `bootc upgrade --download-only` to stage
+	// the latest version of the currently tracked image.
+	UpgradeDownloadOnly(ctx context.Context) error
+
+	// UpgradeApply runs `bootc upgrade --from-downloaded --apply` to
+	// apply a previously staged image and reboot. When softReboot is
+	// true, `--soft-reboot=auto` is appended to use soft reboot when the
+	// kernel and initramfs are unchanged.
+	UpgradeApply(ctx context.Context, softReboot bool) error
+
+	// Rollback runs `bootc rollback`. When apply is true, `--apply` is
+	// appended to also reboot into the previous deployment.
+	Rollback(ctx context.Context, apply bool) error
+}
+
+// CommandRunner abstracts command execution so the client can be tested
+// without actually running nsenter/bootc.
+type CommandRunner interface {
+	// Run executes a command and returns its combined stdout/stderr output.
+	Run(ctx context.Context, name string, args ...string) ([]byte, error)
+}
+
+// NewClient creates a Client that executes bootc commands on the host
+// via nsenter. All commands are prefixed with
+// `nsenter -t 1 -m -- <command>` to enter PID 1's mount namespace.
+func NewClient() Client {
+	return &client{runner: &nsenterRunner{}}
+}
+
+// NewClientWithRunner creates a Client using the given CommandRunner.
+// This is primarily useful for testing.
+func NewClientWithRunner(runner CommandRunner) Client {
+	return &client{runner: runner}
+}
+
+type client struct {
+	runner CommandRunner
+}
+
+func (c *client) IsBootcHost(ctx context.Context) bool {
+	_, err := c.runner.Run(ctx, "nsenter", "-t", "1", "-m", "--", "bootc", "status", "--json")
+	return err == nil
+}
+
+func (c *client) Status(ctx context.Context) (*Host, error) {
+	out, err := c.runner.Run(ctx, "nsenter", "-t", "1", "-m", "--", "bootc", "status", "--json")
+	if err != nil {
+		return nil, fmt.Errorf("running bootc status: %w", err)
+	}
+
+	var host Host
+	if err := json.Unmarshal(out, &host); err != nil {
+		return nil, fmt.Errorf("parsing bootc status JSON: %w", err)
+	}
+	return &host, nil
+}
+
+func (c *client) Switch(ctx context.Context, image string) error {
+	_, err := c.runner.Run(ctx, "nsenter", "-t", "1", "-m", "--", "bootc", "switch", image)
+	if err != nil {
+		return fmt.Errorf("running bootc switch: %w", err)
+	}
+	return nil
+}
+
+func (c *client) UpgradeDownloadOnly(ctx context.Context) error {
+	_, err := c.runner.Run(ctx, "nsenter", "-t", "1", "-m", "--", "bootc", "upgrade", "--download-only")
+	if err != nil {
+		return fmt.Errorf("running bootc upgrade --download-only: %w", err)
+	}
+	return nil
+}
+
+func (c *client) UpgradeApply(ctx context.Context, softReboot bool) error {
+	args := []string{"-t", "1", "-m", "--", "bootc", "upgrade", "--from-downloaded", "--apply"}
+	if softReboot {
+		args = append(args, "--soft-reboot=auto")
+	}
+	_, err := c.runner.Run(ctx, "nsenter", args...)
+	if err != nil {
+		return fmt.Errorf("running bootc upgrade --apply: %w", err)
+	}
+	return nil
+}
+
+func (c *client) Rollback(ctx context.Context, apply bool) error {
+	args := []string{"-t", "1", "-m", "--", "bootc", "rollback"}
+	if apply {
+		args = append(args, "--apply")
+	}
+	_, err := c.runner.Run(ctx, "nsenter", args...)
+	if err != nil {
+		return fmt.Errorf("running bootc rollback: %w", err)
+	}
+	return nil
+}
+
+// nsenterRunner executes commands directly via os/exec.
+type nsenterRunner struct{}
+
+func (r *nsenterRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, name, args...)
+	return cmd.CombinedOutput()
+}
