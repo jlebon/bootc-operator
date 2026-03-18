@@ -51,6 +51,10 @@ const (
 	// check for new image digests (tag re-resolution).
 	reResolutionInterval = 5 * time.Minute
 
+	// activeRolloutInterval is the requeue interval used when a rollout
+	// is in progress (nodes staging, rebooting, or waiting).
+	activeRolloutInterval = 15 * time.Second
+
 	// Condition types for BootcNodePool status.
 	conditionTypeAvailable  = "Available"
 	conditionTypeProgessing = "Progressing"
@@ -161,13 +165,35 @@ func (r *BootcNodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("syncing claims: %w", err)
 	}
 
-	// 11. Compute and update status.
+	// 11. Orchestrate the rollout: advance staged nodes to rebooting,
+	// uncordon successfully rebooted nodes, etc.
+	rollout, err := r.orchestrateRollout(ctx, pool, claimed, nodeMap, desiredImage)
+	if err != nil {
+		return ctrl.Result{}, fmt.Errorf("orchestrating rollout: %w", err)
+	}
+
+	// Re-fetch claimed BootcNodes after rollout may have modified them.
+	// This ensures status counters reflect the latest state.
+	for i, bn := range claimed {
+		fresh := &v1alpha1.BootcNode{}
+		if err := r.Get(ctx, types.NamespacedName{Name: bn.Name}, fresh); err == nil {
+			claimed[i] = fresh
+		}
+	}
+
+	// 12. Compute and update status.
 	if err := r.updateStatus(ctx, req.NamespacedName, pool, desiredImage, claimed, int32(len(matchingNodeNames))); err != nil {
 		return ctrl.Result{}, err
 	}
 
+	// Use a shorter requeue interval during active rollout.
+	requeueAfter := reResolutionInterval
+	if rollout.requeue {
+		requeueAfter = activeRolloutInterval
+	}
+
 	log.Info("Reconciliation complete", "pool", pool.Name, "targetNodes", len(matchingNodeNames), "claimed", len(claimed))
-	return ctrl.Result{RequeueAfter: reResolutionInterval}, nil
+	return ctrl.Result{RequeueAfter: requeueAfter}, nil
 }
 
 // reconcileDelete handles BootcNodePool deletion: release all claimed
@@ -302,7 +328,7 @@ func (r *BootcNodePoolReconciler) claimBootcNode(ctx context.Context, pool *v1al
 		needsUpdate = true
 	}
 
-	desiredPhase := desiredPhaseForNode(bn, desiredImage)
+	desiredPhase := desiredPhaseForNode(bn)
 	if bn.Spec.DesiredPhase != desiredPhase {
 		bn.Spec.DesiredPhase = desiredPhase
 		needsUpdate = true
@@ -325,12 +351,18 @@ func (r *BootcNodePoolReconciler) claimBootcNode(ctx context.Context, pool *v1al
 }
 
 // desiredPhaseForNode determines the correct desiredPhase for a
-// BootcNode based on its current status and the desired image. The
-// reconciler sets Staged initially; the rollout orchestrator (item 6 in
-// the plan) will later advance nodes to Rebooting.
-func desiredPhaseForNode(bn *v1alpha1.BootcNode, desiredImage string) v1alpha1.BootcNodeDesiredPhase {
-	// If the node is already running the desired image, keep it Staged
-	// (no action needed from the daemon).
+// BootcNode during the claiming step. The initial desired phase is
+// always Staged -- the rollout orchestrator advances nodes to
+// Rebooting after staging is complete and batch constraints are met.
+//
+// If the node is already being advanced by the rollout orchestrator
+// (desiredPhase=Rebooting or RollingBack), we preserve that phase.
+func desiredPhaseForNode(bn *v1alpha1.BootcNode) v1alpha1.BootcNodeDesiredPhase {
+	// Preserve Rebooting/RollingBack if already set by the orchestrator.
+	if bn.Spec.DesiredPhase == v1alpha1.BootcNodeDesiredPhaseRebooting ||
+		bn.Spec.DesiredPhase == v1alpha1.BootcNodeDesiredPhaseRollingBack {
+		return bn.Spec.DesiredPhase
+	}
 	return v1alpha1.BootcNodeDesiredPhaseStaged
 }
 
@@ -420,6 +452,7 @@ func computePhase(pool *v1alpha1.BootcNodePool, claimed []*v1alpha1.BootcNode, d
 
 	hasError := false
 	hasStaging := false
+	hasStaged := false
 	hasRebooting := false
 	allReady := true
 
@@ -432,6 +465,7 @@ func computePhase(pool *v1alpha1.BootcNodePool, claimed []*v1alpha1.BootcNode, d
 			hasStaging = true
 			allReady = false
 		case v1alpha1.BootcNodePhaseStaged:
+			hasStaged = true
 			allReady = false
 		case v1alpha1.BootcNodePhaseRebooting, v1alpha1.BootcNodePhaseRollingBack:
 			hasRebooting = true
@@ -463,8 +497,14 @@ func computePhase(pool *v1alpha1.BootcNodePool, claimed []*v1alpha1.BootcNode, d
 	if hasStaging {
 		return v1alpha1.BootcNodePoolPhaseStaging
 	}
+	if hasStaged {
+		// Nodes are staged and waiting to be advanced to rebooting.
+		// During a rolling update, some nodes may be staged while
+		// others are already ready (completed earlier batches).
+		return v1alpha1.BootcNodePoolPhaseRolling
+	}
 
-	// Nodes are staged or waiting -- report as Staging.
+	// No clear signal yet -- nodes may not have reported status.
 	return v1alpha1.BootcNodePoolPhaseStaging
 }
 

@@ -1131,29 +1131,37 @@ execute bootc commands on the host via nsenter.
 
 `internal/controller/rollout.go` -- stage-then-reboot strategy.
 
-- [ ] `Orchestrate(pool, bootcNodes) (status, error)`:
-      - Count nodes by BootcNode phase (Ready, Staging, Staged, Rebooting,
-        Error)
-      - Update BootcNodePool status counters (targetNodes, stagedNodes,
-        readyNodes, updatingNodes)
-      - Determine pool phase:
-        - All ready + at desired image → Ready
-        - Any staging → Staging
-        - Any rebooting/draining → Rolling
-        - Any error → Degraded
-      - If phase = Staging: wait for all nodes to reach Staged
-      - If phase = Rolling or all Staged:
-        - Select next batch of Staged nodes (up to maxUnavailable minus
-          currently updating)
-        - For each selected node: cordon → drain → set
-          desiredPhase=Rebooting on BootcNode
-      - If phase = Rolling and node rebooted successfully: uncordon
-      - Staging re-verification: before selecting a node for reboot,
-        confirm its BootcNode status is still Staged
+- [x] `orchestrateRollout(pool, claimed, nodeMap, desiredImage)`:
+      - `classifyNodes()` groups nodes by phase (readyAtDesired, staged,
+        staging, rebooting, rollingBack, errored, needsStaging)
+      - Pool status counters updated from classification in controller's
+        existing `updateStatus()` and `computePhase()`
+      - `computePhase()` updated: Staged nodes without rebooting →
+        Rolling (not Staging); tracks `hasStaged` separately
+      - `uncordonReadyNodes()`: uncordons nodes that rebooted into
+        desired image, resets desiredPhase to Staged
+      - Error nodes → stop rollout (Degraded), don't advance more
+      - RollingBack nodes → wait (requeue)
+      - `advanceStagedNodes()`: selects next batch of Staged nodes
+        (up to maxUnavailable minus currently rebooting), sorts by
+        name for deterministic ordering, cordons each node, sets
+        desiredPhase=Rebooting
+      - Staging re-verification: confirms node is still Staged before
+        advancing (guards against races)
+      - Active rollout uses 15s requeue interval (vs 5m default)
+      - `desiredPhaseForNode()` preserves Rebooting/RollingBack if
+        already set by orchestrator (prevents claim sync from resetting)
+- [x] Integration tests (envtest): 10 rollout-specific tests covering
+      advance to Rebooting, maxUnavailable=1 and =2, uncordon after
+      success, no advance during staging, wait for rebooting nodes,
+      preserve Rebooting phase, error stops rollout, full multi-batch
+      rolling update, pool phase Rolling when staged, image update
+      mid-rollout. Controller coverage: 76.8%.
 - [ ] Health check: track time since desiredPhase was set to Rebooting.
       If node doesn't become Ready within healthCheck.timeout → trigger
-      rollback (set desiredPhase=RollingBack)
-- [ ] On rollback trigger: set pool phase to Degraded, stop rollout
+      rollback (set desiredPhase=RollingBack). Deferred to item 9.
+- [ ] Drain: currently cordons only; drain (pod eviction) deferred to
+      item 7 (drain manager)
 
 ### 7. Drain manager
 

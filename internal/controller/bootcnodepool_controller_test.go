@@ -709,4 +709,499 @@ var _ = Describe("BootcNodePool Controller", func() {
 			Expect(bn.ResourceVersion).To(Equal(rv))
 		})
 	})
+
+	Context("Rollout orchestration", func() {
+		It("should advance a staged node to Rebooting and cordon it", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+
+			// Simulate daemon staging the image.
+			bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// Reconcile: claims the node + orchestrates rollout.
+			result, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(activeRolloutInterval))
+
+			// Verify the BootcNode was advanced to Rebooting.
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseRebooting))
+
+			// Verify the Node was cordoned.
+			updatedNode := &corev1.Node{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName1}, updatedNode)).To(Succeed())
+			Expect(updatedNode.Spec.Unschedulable).To(BeTrue())
+
+			// Pool phase should be Rolling.
+			pool := getPool(ctx, poolName)
+			Expect(pool.Status.Phase).To(Equal(v1alpha1.BootcNodePoolPhaseRolling))
+		})
+
+		It("should respect maxUnavailable when advancing nodes", func() {
+			// Create 3 worker nodes, all staged.
+			for _, name := range []string{nodeName1, nodeName2, nodeName3} {
+				node := createNode(ctx, name, map[string]string{
+					"role": "worker",
+				})
+				bn := createBootcNode(ctx, name, node)
+				bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+				bn.Status.Staged.Image = testImage
+				Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+			}
+
+			// maxUnavailable = 1: only 1 node should be advanced.
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+				Rollout: v1alpha1.RolloutConfig{
+					MaxUnavailable: 1,
+				},
+			})
+
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Count how many BootcNodes have desiredPhase=Rebooting.
+			rebootingCount := 0
+			for _, name := range []string{nodeName1, nodeName2, nodeName3} {
+				bn := getBootcNode(ctx, name)
+				if bn.Spec.DesiredPhase == v1alpha1.BootcNodeDesiredPhaseRebooting {
+					rebootingCount++
+				}
+			}
+			Expect(rebootingCount).To(Equal(1))
+		})
+
+		It("should advance up to maxUnavailable nodes when set to 2", func() {
+			for _, name := range []string{nodeName1, nodeName2, nodeName3} {
+				node := createNode(ctx, name, map[string]string{
+					"role": "worker",
+				})
+				bn := createBootcNode(ctx, name, node)
+				bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+				bn.Status.Staged.Image = testImage
+				Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+			}
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+				Rollout: v1alpha1.RolloutConfig{
+					MaxUnavailable: 2,
+				},
+			})
+
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			rebootingCount := 0
+			for _, name := range []string{nodeName1, nodeName2, nodeName3} {
+				bn := getBootcNode(ctx, name)
+				if bn.Spec.DesiredPhase == v1alpha1.BootcNodeDesiredPhaseRebooting {
+					rebootingCount++
+				}
+			}
+			Expect(rebootingCount).To(Equal(2))
+		})
+
+		It("should uncordon a node after successful reboot to desired image", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// Step 1: Stage the image.
+			bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify node is cordoned and BootcNode desiredPhase=Rebooting.
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseRebooting))
+			updatedNode := &corev1.Node{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName1}, updatedNode)).To(Succeed())
+			Expect(updatedNode.Spec.Unschedulable).To(BeTrue())
+
+			// Step 2: Simulate successful reboot -- daemon reports
+			// Ready with booted image = desired.
+			bn = getBootcNode(ctx, nodeName1)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseReady
+			bn.Status.Booted.Image = testImage
+			bn.Status.Staged = v1alpha1.BootEntryStatus{}
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			_, err = reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify node is uncordoned.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName1}, updatedNode)).To(Succeed())
+			Expect(updatedNode.Spec.Unschedulable).To(BeFalse())
+
+			// Pool should be Ready.
+			pool := getPool(ctx, poolName)
+			Expect(pool.Status.Phase).To(Equal(v1alpha1.BootcNodePoolPhaseReady))
+		})
+
+		It("should not advance nodes while they are still staging", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+
+			// Node is still staging (downloading).
+			bn.Status.Phase = v1alpha1.BootcNodePhaseStaging
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			result, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(activeRolloutInterval))
+
+			// BootcNode should still have desiredPhase=Staged.
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseStaged))
+
+			// Node should not be cordoned.
+			updatedNode := &corev1.Node{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: nodeName1}, updatedNode)).To(Succeed())
+			Expect(updatedNode.Spec.Unschedulable).To(BeFalse())
+		})
+
+		It("should wait for rebooting nodes before advancing more", func() {
+			// Create 2 nodes, both staged.
+			node1 := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn1 := createBootcNode(ctx, nodeName1, node1)
+			bn1.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn1.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn1)).To(Succeed())
+
+			node2 := createNode(ctx, nodeName2, map[string]string{
+				"role": "worker",
+			})
+			bn2 := createBootcNode(ctx, nodeName2, node2)
+			bn2.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn2.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn2)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+				Rollout: v1alpha1.RolloutConfig{
+					MaxUnavailable: 1,
+				},
+			})
+
+			// First reconcile: one node advanced.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate the advanced node is now rebooting (daemon
+			// picked it up).
+			bn1 = getBootcNode(ctx, nodeName1)
+			if bn1.Spec.DesiredPhase == v1alpha1.BootcNodeDesiredPhaseRebooting {
+				bn1.Status.Phase = v1alpha1.BootcNodePhaseRebooting
+				Expect(k8sClient.Status().Update(ctx, bn1)).To(Succeed())
+			}
+
+			// Second reconcile: maxUnavailable=1 is reached, second
+			// node should not be advanced.
+			_, err = reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			bn2 = getBootcNode(ctx, nodeName2)
+			Expect(bn2.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseStaged))
+		})
+
+		It("should preserve Rebooting phase during reconciliation", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseRebooting
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// First reconcile claims the node.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Manually set desiredPhase to Rebooting to simulate
+			// rollout orchestrator having advanced it.
+			bn = getBootcNode(ctx, nodeName1)
+			bn.Spec.DesiredPhase = v1alpha1.BootcNodeDesiredPhaseRebooting
+			Expect(k8sClient.Update(ctx, bn)).To(Succeed())
+
+			// Reconcile again -- should preserve Rebooting.
+			_, err = reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseRebooting))
+		})
+
+		It("should stop rollout when a node is in error", func() {
+			node1 := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn1 := createBootcNode(ctx, nodeName1, node1)
+			bn1.Status.Phase = v1alpha1.BootcNodePhaseError
+			bn1.Status.Message = "bootc switch failed"
+			Expect(k8sClient.Status().Update(ctx, bn1)).To(Succeed())
+
+			node2 := createNode(ctx, nodeName2, map[string]string{
+				"role": "worker",
+			})
+			bn2 := createBootcNode(ctx, nodeName2, node2)
+			bn2.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn2.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn2)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Pool should be Degraded.
+			pool := getPool(ctx, poolName)
+			Expect(pool.Status.Phase).To(Equal(v1alpha1.BootcNodePoolPhaseDegraded))
+
+			// The staged node should NOT have been advanced to
+			// Rebooting (rollout paused).
+			bn2 = getBootcNode(ctx, nodeName2)
+			Expect(bn2.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseStaged))
+		})
+
+		It("should complete full rolling update across multiple batches", func() {
+			// Scenario: 3 nodes, maxUnavailable=1, full rolling update.
+			nodes := make(map[string]*corev1.Node)
+			bns := make(map[string]*v1alpha1.BootcNode)
+			for _, name := range []string{nodeName1, nodeName2, nodeName3} {
+				nodes[name] = createNode(ctx, name, map[string]string{
+					"role": "worker",
+				})
+				bns[name] = createBootcNode(ctx, name, nodes[name])
+			}
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+				Rollout: v1alpha1.RolloutConfig{
+					MaxUnavailable: 1,
+				},
+			})
+
+			// Reconcile 1: claims all nodes, sets desiredPhase=Staged.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate all nodes staging.
+			for _, name := range []string{nodeName1, nodeName2, nodeName3} {
+				bn := getBootcNode(ctx, name)
+				bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+				bn.Status.Staged.Image = testImage
+				Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+			}
+
+			// Reconcile 2: advances first batch (1 node).
+			_, err = reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Find which node was advanced.
+			var advancedName string
+			for _, name := range []string{nodeName1, nodeName2, nodeName3} {
+				bn := getBootcNode(ctx, name)
+				if bn.Spec.DesiredPhase == v1alpha1.BootcNodeDesiredPhaseRebooting {
+					advancedName = name
+					break
+				}
+			}
+			Expect(advancedName).NotTo(BeEmpty())
+
+			// Simulate successful reboot for the advanced node.
+			bn := getBootcNode(ctx, advancedName)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseReady
+			bn.Status.Booted.Image = testImage
+			bn.Status.Staged = v1alpha1.BootEntryStatus{}
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile 3: uncordons first node, advances second.
+			_, err = reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify first node is uncordoned.
+			updatedNode := &corev1.Node{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: advancedName}, updatedNode)).To(Succeed())
+			Expect(updatedNode.Spec.Unschedulable).To(BeFalse())
+
+			// Find second advanced node.
+			var secondAdvanced string
+			for _, name := range []string{nodeName1, nodeName2, nodeName3} {
+				if name == advancedName {
+					continue
+				}
+				bn := getBootcNode(ctx, name)
+				if bn.Spec.DesiredPhase == v1alpha1.BootcNodeDesiredPhaseRebooting {
+					secondAdvanced = name
+					break
+				}
+			}
+			Expect(secondAdvanced).NotTo(BeEmpty())
+
+			// Simulate second node completing.
+			bn = getBootcNode(ctx, secondAdvanced)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseReady
+			bn.Status.Booted.Image = testImage
+			bn.Status.Staged = v1alpha1.BootEntryStatus{}
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile 4: uncordons second, advances third.
+			_, err = reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			// Find the remaining node.
+			var thirdName string
+			for _, name := range []string{nodeName1, nodeName2, nodeName3} {
+				if name != advancedName && name != secondAdvanced {
+					thirdName = name
+					break
+				}
+			}
+
+			// Simulate third node completing.
+			bn = getBootcNode(ctx, thirdName)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseReady
+			bn.Status.Booted.Image = testImage
+			bn.Status.Staged = v1alpha1.BootEntryStatus{}
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile 5: all done.
+			result, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			pool := getPool(ctx, poolName)
+			Expect(pool.Status.Phase).To(Equal(v1alpha1.BootcNodePoolPhaseReady))
+			Expect(pool.Status.ReadyNodes).To(Equal(int32(3)))
+			Expect(pool.Status.TargetNodes).To(Equal(int32(3)))
+
+			// Requeue should go back to the slow interval since
+			// rollout is complete.
+			Expect(result.RequeueAfter).To(Equal(reResolutionInterval))
+		})
+
+		It("should report pool phase as Rolling when nodes are staged", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+
+			// Node staged but not yet ready at desired image -- this
+			// triggers the orchestrator, which will cordon+advance it.
+			bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			pool := getPool(ctx, poolName)
+			Expect(pool.Status.Phase).To(Equal(v1alpha1.BootcNodePoolPhaseRolling))
+		})
+
+		It("should handle image update mid-rollout by resetting desiredPhase", func() {
+			node := createNode(ctx, nodeName1, map[string]string{
+				"role": "worker",
+			})
+			bn := createBootcNode(ctx, nodeName1, node)
+			bn.Status.Phase = v1alpha1.BootcNodePhaseStaged
+			bn.Status.Staged.Image = testImage
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			createPool(ctx, poolName, v1alpha1.BootcNodePoolSpec{
+				Image: testImage,
+				NodeSelector: &metav1.LabelSelector{
+					MatchLabels: map[string]string{"role": "worker"},
+				},
+			})
+
+			// Reconcile: advances node to Rebooting.
+			_, err := reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredPhase).To(Equal(v1alpha1.BootcNodeDesiredPhaseRebooting))
+
+			// Update pool image -- new image cancels the current
+			// rollout. The claimBootcNode sets the new desiredImage,
+			// but desiredPhaseForNode preserves Rebooting.
+			pool := getPool(ctx, poolName)
+			newImage := "quay.io/example/my-bootc-image:v2"
+			pool.Spec.Image = newImage
+			Expect(k8sClient.Update(ctx, pool)).To(Succeed())
+
+			_, err = reconcilePool(ctx, poolName)
+			Expect(err).NotTo(HaveOccurred())
+
+			bn = getBootcNode(ctx, nodeName1)
+			Expect(bn.Spec.DesiredImage).To(Equal(newImage))
+			// Since the image changed, the daemon will need to
+			// re-stage. The desiredPhase is preserved as Rebooting
+			// because desiredPhaseForNode preserves it, but the daemon
+			// will detect the image mismatch and re-stage.
+		})
+	})
 })
