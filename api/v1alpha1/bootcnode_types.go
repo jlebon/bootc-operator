@@ -20,67 +20,180 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
+// BootcNodeDesiredPhase describes the phase that the daemon should work towards.
+// +kubebuilder:validation:Enum=Staged;Rebooting;RollingBack
+type BootcNodeDesiredPhase string
 
-// BootcNodeSpec defines the desired state of BootcNode
+const (
+	// BootcNodeDesiredPhaseStaged instructs the daemon to download and stage
+	// the desired image without rebooting.
+	BootcNodeDesiredPhaseStaged BootcNodeDesiredPhase = "Staged"
+
+	// BootcNodeDesiredPhaseRebooting instructs the daemon to apply the staged
+	// image and reboot (soft reboot if possible, full otherwise).
+	BootcNodeDesiredPhaseRebooting BootcNodeDesiredPhase = "Rebooting"
+
+	// BootcNodeDesiredPhaseRollingBack instructs the daemon to rollback to
+	// the previous image and reboot.
+	BootcNodeDesiredPhaseRollingBack BootcNodeDesiredPhase = "RollingBack"
+)
+
+// BootcNodePhase describes the current phase of the daemon on a node.
+// +kubebuilder:validation:Enum=Ready;Staging;Staged;Rebooting;RollingBack;Error
+type BootcNodePhase string
+
+const (
+	// BootcNodePhaseReady indicates the node is running the desired image.
+	BootcNodePhaseReady BootcNodePhase = "Ready"
+
+	// BootcNodePhaseStaging indicates the daemon is downloading/staging
+	// the desired image.
+	BootcNodePhaseStaging BootcNodePhase = "Staging"
+
+	// BootcNodePhaseStaged indicates the desired image is staged and
+	// ready to be applied on reboot.
+	BootcNodePhaseStaged BootcNodePhase = "Staged"
+
+	// BootcNodePhaseRebooting indicates the daemon is applying the staged
+	// image and rebooting.
+	BootcNodePhaseRebooting BootcNodePhase = "Rebooting"
+
+	// BootcNodePhaseRollingBack indicates the daemon is rolling back to
+	// the previous image.
+	BootcNodePhaseRollingBack BootcNodePhase = "RollingBack"
+
+	// BootcNodePhaseError indicates an error occurred during the update.
+	BootcNodePhaseError BootcNodePhase = "Error"
+)
+
+// BootcNodeSpec defines the desired bootc state for a single node.
+// All fields are optional -- when empty, the daemon just reports status
+// without taking any action.
 type BootcNodeSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of BootcNode. Edit bootcnode_types.go to remove/update
+	// desiredImage is the container image digest that this node should be
+	// running. Always a fully qualified digest reference
+	// (e.g. "quay.io/example/my-image@sha256:abc123..."). Set by the
+	// operator when a pool claims this node. Empty when no pool has
+	// claimed the node.
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	DesiredImage string `json:"desiredImage,omitempty"`
+
+	// desiredPhase is the phase that the daemon should work towards.
+	// Must be one of "Staged", "Rebooting", or "RollingBack".
+	// Set by the operator to drive the daemon through the rollout
+	// lifecycle. Empty when no pool has claimed the node.
+	// +optional
+	DesiredPhase BootcNodeDesiredPhase `json:"desiredPhase,omitempty"`
+
+	// rebootPolicy determines how the daemon reboots this node.
+	// Propagated from the owning BootcNodePool's disruption config.
+	// Must be one of "Auto", "Full", or "Never". When empty, defaults
+	// to "Auto".
+	// +optional
+	RebootPolicy RebootPolicy `json:"rebootPolicy,omitempty"`
 }
 
-// BootcNodeStatus defines the observed state of BootcNode.
+// BootEntryStatus describes a single bootc deployment slot (booted,
+// staged, or rollback), as reported by `bootc status --json`.
+type BootEntryStatus struct {
+	// image is the fully qualified container image reference for this
+	// deployment (e.g. "quay.io/example/my-image@sha256:abc123...").
+	// +optional
+	Image string `json:"image,omitempty"`
+
+	// version is the image version label, if available.
+	// +optional
+	Version string `json:"version,omitempty"`
+
+	// timestamp is when this deployment's image was built.
+	// +optional
+	Timestamp metav1.Time `json:"timestamp,omitempty"`
+
+	// softRebootCapable indicates whether this deployment can be reached
+	// via a soft reboot (userspace-only restart) rather than a full
+	// hardware reboot. This is true when the kernel and initramfs are
+	// unchanged relative to the currently booted deployment.
+	// +optional
+	SoftRebootCapable bool `json:"softRebootCapable,omitempty"`
+}
+
+// BootcNodeStatus reflects the observed bootc state on a node, as
+// reported by the daemon from `bootc status --json`.
 type BootcNodeStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// booted is the bootc deployment that the node is currently running.
+	// +optional
+	Booted BootEntryStatus `json:"booted,omitempty,omitzero"`
 
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
+	// staged is the bootc deployment that is staged for the next boot,
+	// if any.
+	// +optional
+	Staged BootEntryStatus `json:"staged,omitempty,omitzero"`
 
-	// conditions represent the current state of the BootcNode resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// rollback is the bootc deployment that the node can roll back to,
+	// if any.
+	// +optional
+	Rollback BootEntryStatus `json:"rollback,omitempty,omitzero"`
+
+	// phase is the daemon's current phase on this node.
+	// +optional
+	Phase BootcNodePhase `json:"phase,omitempty"`
+
+	// message is a human-readable description of the current state or
+	// error. Empty when no additional detail is available.
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// conditions represent the latest observations of this node's bootc
+	// state. Known .status.conditions.type values are: "ImageStaged"
+	// and "Healthy".
 	// +listType=map
 	// +listMapKey=type
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
+// BootcNode tracks the bootc state of a single cluster node. Created by
+// the daemon when it detects the node is a bootc host. The daemon reports
+// status; the operator sets the spec when a BootcNodePool claims the node.
+// When no pool claims the node, the spec is empty and the daemon just
+// reports the current bootc state.
+//
+// The name MUST match the Kubernetes Node name. The ownerReference
+// points to the Node object (not the pool), so the BootcNode is GC'd
+// when the Node is deleted.
+//
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-
-// BootcNode is the Schema for the bootcnodes API
+// +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Pool",type=string,JSONPath=".metadata.labels.bootc\\.dev/pool"
+// +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"
+// +kubebuilder:printcolumn:name="Booted",type=string,JSONPath=".status.booted.image",priority=1
+// +kubebuilder:printcolumn:name="Staged",type=string,JSONPath=".status.staged.image",priority=1
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
 type BootcNode struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
+	// metadata is the standard object's metadata.
+	// The name must match the Kubernetes Node name.
+	// The label bootc.dev/pool indicates which BootcNodePool (if any)
+	// has claimed this node. Empty or absent when unassigned.
 	// +optional
-	metav1.ObjectMeta `json:"metadata,omitzero"`
+	metav1.ObjectMeta `json:"metadata,omitempty,omitzero"`
 
-	// spec defines the desired state of BootcNode
-	// +required
-	Spec BootcNodeSpec `json:"spec"`
-
-	// status defines the observed state of BootcNode
+	// spec defines the desired bootc state for this node. Set by the
+	// operator when a BootcNodePool claims this node. Empty when no
+	// pool has claimed the node (daemon just reports status).
 	// +optional
-	Status BootcNodeStatus `json:"status,omitzero"`
+	Spec BootcNodeSpec `json:"spec,omitempty,omitzero"`
+
+	// status reflects the observed bootc state, reported by the daemon.
+	// +optional
+	Status BootcNodeStatus `json:"status,omitempty,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// BootcNodeList contains a list of BootcNode
+// BootcNodeList contains a list of BootcNode.
 type BootcNodeList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

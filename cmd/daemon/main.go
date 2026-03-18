@@ -32,7 +32,10 @@ func main() {
 	var pollInterval int
 	var kubeconfig string
 
-	flag.StringVar(&nodeName, "node-name", os.Getenv("NODE_NAME"), "The name of the node this daemon is running on (defaults to NODE_NAME env var)")
+	flag.StringVar(
+		&nodeName, "node-name", os.Getenv("NODE_NAME"),
+		"The name of the node this daemon is running on (defaults to NODE_NAME env var)",
+	)
 	flag.IntVar(&pollInterval, "poll-interval", 30, "How often (in seconds) to poll the BootcNode CRD")
 	flag.StringVar(&kubeconfig, "kubeconfig", "", "Path to a kubeconfig (for out-of-cluster development)")
 	klog.InitFlags(nil)

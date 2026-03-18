@@ -12,12 +12,36 @@ spec:
     listKind: BootcNodePoolList
     plural: bootcnodepools
     singular: bootcnodepool
-  scope: Namespaced
+  scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .spec.image
+      name: Image
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.readyNodes
+      name: Ready
+      type: string
+    - jsonPath: .status.stagedNodes
+      name: Staged
+      priority: 1
+      type: string
+    - jsonPath: .status.targetNodes
+      name: Target
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: BootcNodePool is the Schema for the bootcnodepools API
+        description: |-
+          BootcNodePool defines a pool of nodes that should run a specific bootc
+          image. The operator resolves the image reference, stages it on matching
+          nodes, and orchestrates rolling reboots to apply it. Analogous to a
+          MachineConfigPool in the MCO.
         properties:
           apiVersion:
             description: |-
@@ -37,27 +61,157 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of BootcNodePool
+            description: spec defines the desired bootc image and rollout parameters.
             properties:
-              foo:
-                description: foo is an example field of BootcNodePool. Edit bootcnodepool_types.go
-                  to remove/update
+              disruption:
+                description: |-
+                  disruption configures the disruption policy for node reboots during
+                  rollout. When omitted, the operator defaults to Auto reboot policy.
+                properties:
+                  rebootPolicy:
+                    default: Auto
+                    description: |-
+                      rebootPolicy determines how the operator reboots nodes after staging
+                      an image. Must be one of "Auto", "Full", or "Never".
+                      When omitted, the operator defaults to "Auto", which uses soft reboot
+                      when possible and falls back to a full reboot otherwise.
+                    enum:
+                    - Auto
+                    - Full
+                    - Never
+                    type: string
+                type: object
+              healthCheck:
+                description: |-
+                  healthCheck configures how the operator verifies node health after
+                  a reboot. When omitted, defaults are used.
+                properties:
+                  timeout:
+                    default: 5m
+                    description: |-
+                      timeout is how long the operator waits for a node to become Ready
+                      after a reboot before considering the update failed and triggering
+                      a rollback. Must be a valid duration string (e.g. "5m", "10m").
+                      When omitted, defaults to "5m".
+                    type: string
+                type: object
+              image:
+                description: |-
+                  image is the container image reference to deploy to the targeted nodes.
+                  This may be a tag (e.g. "quay.io/example/my-image:latest") or a digest
+                  (e.g. "quay.io/example/my-image@sha256:abc123..."). When a tag is
+                  specified, the operator periodically resolves it to a digest; a new
+                  digest triggers a rollout. When a digest is specified, the operator
+                  deploys exactly that image.
+                minLength: 1
                 type: string
+              imagePullSecret:
+                description: |-
+                  imagePullSecret references a Secret in the operator's namespace that
+                  contains credentials for pulling the image from a protected registry.
+                  The Secret must be of type kubernetes.io/dockerconfigjson.
+
+                  The operator uses this secret for tag-to-digest resolution via
+                  go-containerregistry. The daemon writes the secret to
+                  /run/ostree/auth.json on the host before running bootc commands.
+                  This is the highest-priority auth path that bootc checks (above
+                  /etc/ostree/auth.json and /usr/lib/ostree/auth.json), and it is
+                  ephemeral (cleared on reboot), so it does not persistently mutate
+                  the host.
+
+                  When omitted, no additional credentials are provided. The node's
+                  existing auth configuration (e.g. /etc/ostree/auth.json) is used
+                  as-is. This is sufficient when the image is public or the node
+                  already has credentials configured.
+                properties:
+                  name:
+                    description: |-
+                      name is the metadata.name of the referenced Secret. The Secret must
+                      be of type kubernetes.io/dockerconfigjson and must exist in the
+                      operator's namespace.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                type: object
+              nodeSelector:
+                description: |-
+                  nodeSelector selects the nodes that this image should be deployed to.
+                  Only nodes matching all of the selector's requirements are targeted.
+                  When omitted, no nodes are targeted.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              rollout:
+                description: |-
+                  rollout configures how the image is rolled out to the targeted nodes.
+                  When omitted, default rollout parameters are used.
+                properties:
+                  maxUnavailable:
+                    default: 1
+                    description: |-
+                      maxUnavailable is the maximum number of nodes that may be unavailable
+                      (cordoned/rebooting) simultaneously during the reboot phase of a
+                      rollout. Must be at least 1. When omitted, defaults to 1.
+                    format: int32
+                    minimum: 1
+                    type: integer
+                type: object
+            required:
+            - image
             type: object
           status:
-            description: status defines the observed state of BootcNodePool
+            description: status reflects the observed state of the rollout.
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the BootcNodePool resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
+                  conditions represent the latest observations of the BootcNodePool's
+                  state. Known .status.conditions.type values are: "Available",
+                  "Progressing", and "Degraded".
 
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                  The Progressing condition's message includes progress detail,
+                  e.g. "5 of 10 nodes staged, 3 of 10 rebooted".
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +270,57 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  observedGeneration is the .metadata.generation that the controller
+                  last processed. Used to detect stale status (if observedGeneration
+                  < metadata.generation, the controller hasn't reconciled the latest
+                  spec change yet).
+                format: int64
+                type: integer
+              phase:
+                description: |-
+                  phase is the overall phase of the pool. Provides an at-a-glance
+                  summary of the pool's state. Derived from the conditions and node
+                  counters. Must be one of "Idle", "Staging", "Rolling", "Ready",
+                  or "Degraded". The steady-state update cycle is:
+                  Ready → Staging → Rolling → Ready.
+                enum:
+                - Idle
+                - Staging
+                - Rolling
+                - Ready
+                - Degraded
+                type: string
+              readyNodes:
+                description: |-
+                  readyNodes is the number of nodes that are running the desired image
+                  and are in a Ready state.
+                format: int32
+                type: integer
+              resolvedDigest:
+                description: |-
+                  resolvedDigest is the digest that the operator resolved from the
+                  image reference in the spec. When the spec image is already a digest,
+                  this matches it directly. When it is a tag, this is the digest the
+                  tag currently points to. Empty when resolution has not yet occurred.
+                type: string
+              stagedNodes:
+                description: |-
+                  stagedNodes is the number of nodes that have staged the desired image
+                  but have not yet rebooted into it.
+                format: int32
+                type: integer
+              targetNodes:
+                description: targetNodes is the number of nodes matching the nodeSelector.
+                format: int32
+                type: integer
+              updatingNodes:
+                description: |-
+                  updatingNodes is the number of nodes that are currently being
+                  drained, rebooted, or verified.
+                format: int32
+                type: integer
             type: object
         required:
         - spec

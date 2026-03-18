@@ -36,9 +36,9 @@ var _ = Describe("BootcNodePool Controller", func() {
 
 		ctx := context.Background()
 
+		// BootcNodePool is cluster-scoped, so no namespace is needed.
 		typeNamespacedName := types.NamespacedName{
-			Name:      resourceName,
-			Namespace: "default", // TODO(user):Modify as needed
+			Name: resourceName,
 		}
 		bootcnodepool := &bootcdevv1alpha1.BootcNodePool{}
 
@@ -48,17 +48,17 @@ var _ = Describe("BootcNodePool Controller", func() {
 			if err != nil && errors.IsNotFound(err) {
 				resource := &bootcdevv1alpha1.BootcNodePool{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      resourceName,
-						Namespace: "default",
+						Name: resourceName,
 					},
-					// TODO(user): Specify other spec details if needed.
+					Spec: bootcdevv1alpha1.BootcNodePoolSpec{
+						Image: "quay.io/example/my-bootc-image:latest",
+					},
 				}
 				Expect(k8sClient.Create(ctx, resource)).To(Succeed())
 			}
 		})
 
 		AfterEach(func() {
-			// TODO(user): Cleanup logic after each test, like removing the resource instance.
 			resource := &bootcdevv1alpha1.BootcNodePool{}
 			err := k8sClient.Get(ctx, typeNamespacedName, resource)
 			Expect(err).NotTo(HaveOccurred())
