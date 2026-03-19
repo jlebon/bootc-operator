@@ -1321,22 +1321,30 @@ in the controller.
 
 ### 11. Testing
 
-- [ ] **Unit tests** (Ginkgo v2 + Gomega):
-      - bootc client JSON parsing
-      - Daemon state machine transitions (mock bootc client)
-      - Rollout orchestration logic (mock BootcNode states)
-      - Drain manager (fake client)
-- [ ] **Integration tests** (envtest):
+- [x] **Unit tests** (Ginkgo v2 + Gomega):
+      - bootc client JSON parsing (35 tests, `pkg/bootc/client_test.go`)
+      - Daemon state machine transitions (25 tests, `internal/daemon/daemon_test.go`)
+      - Rollout orchestration logic (28 tests, `internal/controller/bootcnodepool_controller_test.go`)
+      - Drain manager (8 tests, `pkg/drain/drain_test.go`)
+      - DaemonSet reconciler (9 tests, `internal/controller/daemonset_test.go`)
+- [x] **Integration tests** (envtest):
       - Create BootcNodePool → verify conditions initialized
       - Simulate daemon-created BootcNodes → verify pool claims them
       - Delete BootcNodePool → verify finalizer cleans up (uncordon,
         release BootcNodes)
       - Overlapping pools → verify Degraded condition
-      - Update image tag → verify rollout restarts
-- [ ] **E2E tests** (existing `tests/` harness):
-      - `tests/test-rollout.sh`: deploy operator + daemon, create
-        BootcNodePool targeting the single-node cluster, verify staging,
-        verify reboot, verify node is running the new image
+      - Rollout orchestration: staging, cordon, drain, reboot, uncordon
+      - Health check timeouts and auto-rollback
+      - Event emission (8 event tests)
+- [x] **E2E tests** (existing `tests/` harness):
+      - `tests/test-rollout.sh`: deploys operator + daemon into a
+        single-node FCOS VM with Kubernetes. Imports pre-built container
+        images (from `tests/.artifacts/`), applies install.yaml, verifies:
+        operator creates daemon DaemonSet, daemon pod starts and creates
+        BootcNode, BootcNodePool claims the node, pool converges to
+        Ready (node already at desired image), pool deletion releases
+        the BootcNode cleanly. Uses the same test harness as
+        `test-smoke.sh` (virtiofs, autopkgtest reboot support).
 
 ## Verification
 
