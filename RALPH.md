@@ -1,2 +1,3 @@
 - break down your work into logical commits
-- whenever possible and reasonable, add tests. once you get to the point where e2e testing using the harness in tests/, do so.
+- whenever possible and reasonable, add tests
+- read the e2e test harness in `tests/`. once you get to the point where it is possible to add e2e tests, do so.

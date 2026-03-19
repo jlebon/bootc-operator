@@ -1033,10 +1033,10 @@ conventions.
 execute bootc commands on the host via chroot into the host rootfs.
 Uses a `CommandRunner` interface for testability.
 
-- [ ] `pkg/bootc/types.go`: Go types matching the `org.containers.bootc/v1`
+- [x] `pkg/bootc/types.go`: Go types matching the `org.containers.bootc/v1`
       BootcHost JSON schema (booted/staged/rollback deployments, image refs,
       versions, timestamps, softRebootCapable)
-- [ ] `pkg/bootc/client.go`: `Client` interface + implementation:
+- [x] `pkg/bootc/client.go`: `Client` interface + implementation:
       - `CommandRunner` interface: `Run(ctx, name, args...) ([]byte, error)`.
         Default impl: `chrootRunner` that uses `SysProcAttr.Chroot` to
         exec commands inside `/run/rootfs` with `container` env var cleared.
@@ -1049,15 +1049,18 @@ Uses a `CommandRunner` interface for testability.
         --from-downloaded [--soft-reboot=auto] --apply`
       - `Rollback(ctx, apply) error` -- runs `bootc rollback [--apply]`
       - `IsBootcHost(ctx) bool` -- returns true if bootc is available
-- [ ] `pkg/bootc/auth.go`: `WriteAuthFile(ctx, runner, data) error` -- writes
+- [x] `pkg/bootc/auth.go`: `WriteAuthFile(rootfsPath, data) error` -- writes
       dockerconfigjson to `/run/ostree/auth.json` on the host via the rootfs
-      mount. `RemoveAuthFile(ctx, runner) error` for cleanup.
-- [ ] `pkg/bootc/status.go`: JSON parsing logic, mapping BootcHost fields
+      mount. `RemoveAuthFile(rootfsPath) error` for cleanup.
+      Note: implemented using direct file I/O on the rootfs mount rather
+      than CommandRunner, since it's simpler and doesn't need chroot.
+- [x] `pkg/bootc/status.go`: JSON parsing logic, mapping BootcHost fields
       to our `BootEntryStatus` API type. Helpers: `ToBootEntryStatus`,
-      `ToBootcNodeStatus`, `HasStagedImage`, `StagedImageRef`,
-      `BootedImageRef`, `IsDownloadOnly`
-- [ ] Unit tests for JSON parsing, client commands (mock runner), status
-      mapping
+      `ToBootcNodeStatus`, `HasStagedImage`, `StagedImageDigest`,
+      `BootedImageDigest`, `BootedImageRef`, `TrackedImageRef`,
+      `IsDownloadOnly`, `ImageRefWithDigest`, `imageNameWithoutTag`
+- [x] Unit tests for JSON parsing, client commands (mock runner), status
+      mapping, auth file operations (35 tests, 70.9% coverage)
 
 ### 4. Daemon
 
