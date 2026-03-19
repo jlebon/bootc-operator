@@ -974,33 +974,33 @@ distroless). The daemon needs no extra tools -- all host commands
 Set up the kubebuilder project structure and extend it for the dual-binary
 (operator + daemon) layout.
 
-- [ ] `kubebuilder init --domain bootc.dev --repo github.com/jlebon/bootc-operator`
-- [ ] `kubebuilder create api --group "" --version v1alpha1 --kind BootcNodePool`
+- [x] `kubebuilder init --domain bootc.dev --repo github.com/jlebon/bootc-operator`
+- [x] `kubebuilder create api --group "" --version v1alpha1 --kind BootcNodePool`
       (yes to both Resource and Controller)
-- [ ] `kubebuilder create api --group "" --version v1alpha1 --kind BootcNode`
+- [x] `kubebuilder create api --group "" --version v1alpha1 --kind BootcNode`
       (yes to Resource, no to Controller -- the operator watches it but the
       daemon creates it)
-- [ ] Move `cmd/main.go` → `cmd/operator/main.go`; update `Makefile` to
+- [x] Move `cmd/main.go` → `cmd/operator/main.go`; update `Makefile` to
       build from `cmd/operator/`
-- [ ] Create `cmd/daemon/main.go` stub (flag parsing, client-go setup,
+- [x] Create `cmd/daemon/main.go` stub (flag parsing, client-go setup,
       placeholder poll loop)
-- [ ] Add `Makefile` targets: `build-daemon`, `docker-build-daemon`
-- [ ] Create multi-target `Dockerfile` (operator + daemon stages, both
+- [x] Add `Makefile` targets: `build-daemon`, `docker-build-daemon`
+- [x] Create multi-target `Dockerfile` (operator + daemon stages, both
       use `quay.io/hummingbird/core-runtime:latest`)
-- [ ] Create `config/daemon/` directory with:
+- [x] Create `config/daemon/` directory with:
       - `daemonset.yaml` (`privileged: true`, host rootfs at `/run/rootfs`
         via hostPath volume, `nodeAffinity` with `DoesNotExist` on
         `node.bootc.dev/skip`, `NODE_NAME` env from downward API)
       - `service_account.yaml`
       - `kustomization.yaml`
-- [ ] Create daemon RBAC in `config/rbac/`:
+- [x] Create daemon RBAC in `config/rbac/`:
       - `daemon_role.yaml` (ClusterRole: `get`/`create`/`update` on
         `bootcnodes`, `get` on `nodes`)
       - `daemon_role_binding.yaml`
-- [ ] Wire `config/default/kustomization.yaml` to include daemon resources
-- [ ] Rename namespace from `bootc-operator-system` (kubebuilder default)
+- [x] Wire `config/default/kustomization.yaml` to include daemon resources
+- [x] Rename namespace from `bootc-operator-system` (kubebuilder default)
       to `bootc-operator` in `config/default/kustomization.yaml`
-- [ ] Verify `make manifests generate build` passes
+- [x] Verify `make manifests generate build` passes
 
 ### 2. CRD types
 

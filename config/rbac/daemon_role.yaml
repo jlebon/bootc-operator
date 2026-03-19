@@ -1,0 +1,33 @@
+# MANUAL: This file is NOT auto-generated. Daemon RBAC is defined manually
+# because kubebuilder markers only apply to the operator binary.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: daemon-role
+rules:
+  # The daemon creates its own BootcNode CRD on startup, then reads and
+  # updates it on each poll cycle to report bootc status.
+  - apiGroups:
+      - bootc.dev
+    resources:
+      - bootcnodes
+    verbs:
+      - get
+      - create
+      - update
+  # The daemon reads its own BootcNode status subresource and updates it.
+  - apiGroups:
+      - bootc.dev
+    resources:
+      - bootcnodes/status
+    verbs:
+      - get
+      - update
+  # The daemon reads the Node object to set ownerReferences on the
+  # BootcNode it creates.
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get

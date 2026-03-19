@@ -1,0 +1,18 @@
+apiVersion: bootc.dev/v1alpha1
+kind: BootcNodePool
+metadata:
+  labels:
+    app.kubernetes.io/name: bootc-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: worker-nodes
+spec:
+  image: quay.io/example/my-bootc-image:latest
+  nodeSelector:
+    matchLabels:
+      node-role.kubernetes.io/worker: ""
+  rollout:
+    maxUnavailable: 1
+  disruption:
+    rebootPolicy: Auto
+  healthCheck:
+    timeout: 5m

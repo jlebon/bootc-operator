@@ -1,2 +1,7 @@
 /.opencode/plans
 /tests/results/
+/tests/.artifacts/
+
+# kubebuilder build artifacts
+/bin/
+/cover.out

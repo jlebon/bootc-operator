@@ -1,0 +1,13 @@
+# MANUAL: This file is NOT auto-generated.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: daemon-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: daemon-role
+subjects:
+  - kind: ServiceAccount
+    name: bootc-daemon
+    namespace: system

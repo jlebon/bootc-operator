@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: bootc-daemon
+  namespace: system
+  labels:
+    app.kubernetes.io/name: bootc-daemon
+    app.kubernetes.io/component: daemon
+    app.kubernetes.io/part-of: bootc-operator
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: bootc-daemon
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: bootc-daemon
+    spec:
+      serviceAccountName: bootc-daemon
+      # Run on all nodes except those with the skip label
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: node.bootc.dev/skip
+                    operator: DoesNotExist
+      tolerations:
+        # Tolerate all taints so the daemon runs on every node
+        - operator: Exists
+      containers:
+        - name: daemon
+          image: daemon:latest
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            privileged: true
+          volumeMounts:
+            - name: rootfs
+              mountPath: /run/rootfs
+              mountPropagation: HostToContainer
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              memory: 128Mi
+      volumes:
+        - name: rootfs
+          hostPath:
+            path: /
+            type: Directory
