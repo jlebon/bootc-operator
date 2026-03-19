@@ -290,9 +290,7 @@ func TestClientStatus(t *testing.T) {
 	}`
 
 	runner := newFakeRunner()
-	// Status() uses a bash wrapper to write to a temp file, so match
-	// the bash -c prefix.
-	runner.setHandler("nsenter -t 1 -m -- bash", []byte(statusJSON), nil)
+	runner.setHandler("bootc status --json", []byte(statusJSON), nil)
 
 	c := NewClientWithRunner(runner)
 	host, err := c.Status(context.Background())
@@ -311,7 +309,7 @@ func TestClientIsBootcHost(t *testing.T) {
 	runner := newFakeRunner()
 
 	// When bootc status succeeds, the host is a bootc system.
-	runner.setHandler("nsenter -t 1 -m -- systemd-run", []byte("{}"), nil)
+	runner.setHandler("bootc status --json", []byte("{}"), nil)
 	c := NewClientWithRunner(runner)
 	if !c.IsBootcHost(context.Background()) {
 		t.Error("IsBootcHost should return true when bootc status succeeds")
@@ -319,7 +317,7 @@ func TestClientIsBootcHost(t *testing.T) {
 
 	// When bootc status fails, the host is not a bootc system.
 	runner2 := newFakeRunner()
-	runner2.setHandler("nsenter -t 1 -m -- systemd-run", nil, fmt.Errorf("not found"))
+	runner2.setHandler("bootc status --json", nil, fmt.Errorf("not found"))
 	c2 := NewClientWithRunner(runner2)
 	if c2.IsBootcHost(context.Background()) {
 		t.Error("IsBootcHost should return false when bootc status fails")
@@ -328,7 +326,7 @@ func TestClientIsBootcHost(t *testing.T) {
 
 func TestClientSwitch(t *testing.T) {
 	runner := newFakeRunner()
-	runner.setHandler("nsenter -t 1 -m -- systemd-run --wait --quiet --collect bootc switch", nil, nil)
+	runner.setHandler("bootc switch", nil, nil)
 
 	c := NewClientWithRunner(runner)
 	if err := c.Switch(context.Background(), "quay.io/test/newimage:v2"); err != nil {
@@ -346,7 +344,7 @@ func TestClientSwitch(t *testing.T) {
 
 func TestClientUpgradeDownloadOnly(t *testing.T) {
 	runner := newFakeRunner()
-	runner.setHandler("nsenter -t 1 -m -- systemd-run --wait --quiet --collect bootc upgrade --download-only", nil, nil)
+	runner.setHandler("bootc upgrade --download-only", nil, nil)
 
 	c := NewClientWithRunner(runner)
 	if err := c.UpgradeDownloadOnly(context.Background()); err != nil {
@@ -363,20 +361,13 @@ func TestClientUpgradeApply(t *testing.T) {
 		{
 			name:       "without soft reboot",
 			softReboot: false,
-			wantArgs: []string{
-				"-t", "1", "-m", "--",
-				"systemd-run", "--wait", "--quiet", "--collect",
-				"bootc", "upgrade", "--from-downloaded", "--apply",
-			},
+			wantArgs:   []string{"upgrade", "--from-downloaded", "--apply"},
 		},
 		{
 			name:       "with soft reboot",
 			softReboot: true,
 			wantArgs: []string{
-				"-t", "1", "-m", "--",
-				"systemd-run", "--wait", "--quiet", "--collect",
-				"bootc", "upgrade",
-				"--from-downloaded", "--apply", "--soft-reboot=auto",
+				"upgrade", "--from-downloaded", "--apply", "--soft-reboot=auto",
 			},
 		},
 	}
@@ -384,8 +375,7 @@ func TestClientUpgradeApply(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := newFakeRunner()
-			// Match on prefix since the args differ.
-			runner.setHandler("nsenter -t 1 -m -- systemd-run --wait --quiet --collect bootc upgrade", nil, nil)
+			runner.setHandler("bootc upgrade", nil, nil)
 
 			c := NewClientWithRunner(runner)
 			if err := c.UpgradeApply(context.Background(), tt.softReboot); err != nil {
@@ -415,29 +405,21 @@ func TestClientRollback(t *testing.T) {
 		wantArgs []string
 	}{
 		{
-			name:  "without apply",
-			apply: false,
-			wantArgs: []string{
-				"-t", "1", "-m", "--",
-				"systemd-run", "--wait", "--quiet", "--collect",
-				"bootc", "rollback",
-			},
+			name:     "without apply",
+			apply:    false,
+			wantArgs: []string{"rollback"},
 		},
 		{
-			name:  "with apply",
-			apply: true,
-			wantArgs: []string{
-				"-t", "1", "-m", "--",
-				"systemd-run", "--wait", "--quiet", "--collect",
-				"bootc", "rollback", "--apply",
-			},
+			name:     "with apply",
+			apply:    true,
+			wantArgs: []string{"rollback", "--apply"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			runner := newFakeRunner()
-			runner.setHandler("nsenter -t 1 -m -- systemd-run --wait --quiet --collect bootc rollback", nil, nil)
+			runner.setHandler("bootc rollback", nil, nil)
 
 			c := NewClientWithRunner(runner)
 			if err := c.Rollback(context.Background(), tt.apply); err != nil {
@@ -462,7 +444,7 @@ func TestClientRollback(t *testing.T) {
 
 func TestClientStatusParseError(t *testing.T) {
 	runner := newFakeRunner()
-	runner.setHandler("nsenter -t 1 -m -- bash", []byte("not json"), nil)
+	runner.setHandler("bootc status", []byte("not json"), nil)
 
 	c := NewClientWithRunner(runner)
 	_, err := c.Status(context.Background())
@@ -476,7 +458,7 @@ func TestClientStatusParseError(t *testing.T) {
 
 func TestClientStatusCommandError(t *testing.T) {
 	runner := newFakeRunner()
-	runner.setHandler("nsenter -t 1 -m -- bash", nil, fmt.Errorf("exit status 1"))
+	runner.setHandler("bootc status", nil, fmt.Errorf("exit status 1"))
 
 	c := NewClientWithRunner(runner)
 	_, err := c.Status(context.Background())

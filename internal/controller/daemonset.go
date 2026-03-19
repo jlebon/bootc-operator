@@ -32,6 +32,8 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
+	"github.com/jlebon/bootc-operator/pkg/bootc"
 )
 
 const (
@@ -370,6 +372,13 @@ func (r *DaemonSetReconciler) desiredDaemonSet() *appsv1.DaemonSet {
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,
 							},
+							VolumeMounts: []corev1.VolumeMount{
+								{
+									Name:             "rootfs",
+									MountPath:        bootc.HostRootPath,
+									MountPropagation: mountPropagationHostToContainer(),
+								},
+							},
 							Resources: corev1.ResourceRequirements{
 								Requests: corev1.ResourceList{
 									corev1.ResourceCPU:    resource.MustParse("10m"),
@@ -381,10 +390,25 @@ func (r *DaemonSetReconciler) desiredDaemonSet() *appsv1.DaemonSet {
 							},
 						},
 					},
+					Volumes: []corev1.Volume{
+						{
+							Name: "rootfs",
+							VolumeSource: corev1.VolumeSource{
+								HostPath: &corev1.HostPathVolumeSource{
+									Path: "/",
+								},
+							},
+						},
+					},
 				},
 			},
 		},
 	}
+}
+
+func mountPropagationHostToContainer() *corev1.MountPropagationMode {
+	mode := corev1.MountPropagationHostToContainer
+	return &mode
 }
 
 // daemonLabels returns the standard labels for daemon resources.

@@ -20,7 +20,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"strings"
+	"syscall"
 )
 
 // Client defines the interface for interacting with the bootc CLI on a
@@ -60,31 +63,26 @@ type CommandRunner interface {
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
-// NewClient creates a Client that executes bootc commands on the host.
+// HostRootPath is the mount point where the host root filesystem is
+// made available inside the daemon container. The DaemonSet mounts
+// the host's / here via a hostPath volume.
+const HostRootPath = "/run/rootfs"
+
+// NewClient creates a Client that executes bootc commands on the host
+// root filesystem via chroot.
 //
-// All commands run via:
+// The daemon container must mount the host's / at /run/rootfs (see
+// HostRootPath). All bootc commands run via:
 //
-//	nsenter -t 1 -m -- systemd-run --wait --quiet --collect bootc ...
+//	chroot /run/rootfs bootc ...
 //
-// This two-step approach is necessary because bootc reads its state
-// from /sysroot and the ostree repo, which requires both the host
-// mount namespace (nsenter -m) and the host cgroup/process context
-// (systemd-run spawns the command as a native host process). Without
-// systemd-run, bootc detects it is running inside a container (via
-// /proc/self/cgroup) and reports a reduced status.
-//
-// For commands that need stdout (like `bootc status --json`),
-// systemd-run writes to a temporary file on the host filesystem.
-// We cannot use `systemd-run --pipe` because --pipe passes file
-// descriptors from the caller to systemd over D-Bus via SCM_RIGHTS.
-// When the caller is inside a container (even with nsenter -m), the
-// fds reference the container's file descriptor context and systemd
-// rejects them with "Connection reset by peer". The --scope flag
-// avoids this but runs in the caller's cgroup (so bootc still sees
-// the container). The file-output approach (-p StandardOutput=file:)
-// lets systemd create and manage the fds entirely on the host side.
+// The `container` environment variable is cleared before execution
+// because container runtimes (containerd, CRI-O) set `container=oci`
+// in all containers, and bootc checks this variable to detect whether
+// it is running inside a container. When set, bootc returns a reduced
+// status with null booted/staged/rollback fields.
 func NewClient() Client {
-	return &client{runner: &nsenterRunner{}}
+	return &client{runner: &chrootRunner{root: HostRootPath}}
 }
 
 // NewClientWithRunner creates a Client using the given CommandRunner.
@@ -97,44 +95,13 @@ type client struct {
 	runner CommandRunner
 }
 
-// hostExecArgs builds the argument list for running a command on the
-// host via nsenter + systemd-run.
-func hostExecArgs(cmd string, args ...string) []string {
-	// nsenter -t 1 -m -- systemd-run --wait --quiet --collect <cmd> <args...>
-	prefix := [...]string{
-		"-t", "1", "-m", "--",
-		"systemd-run", "--wait", "--quiet", "--collect",
-	}
-	result := make([]string, 0, len(prefix)+1+len(args))
-	result = append(result, prefix[:]...)
-	result = append(result, cmd)
-	result = append(result, args...)
-	return result
-}
-
-// hostStatusArgs builds the argument list for running `bootc status
-// --json` on the host and capturing stdout to a file. We use
-// StandardOutput=file: instead of --pipe because --pipe fails when
-// called across container boundaries (see NewClient docs).
-func hostStatusArgs() []string {
-	return []string{
-		"-t", "1", "-m", "--",
-		"bash", "-c",
-		"systemd-run --wait --quiet --collect " +
-			"-p StandardOutput=file:/run/bootc-status.json " +
-			"bootc status --json && " +
-			"cat /run/bootc-status.json; " +
-			"rm -f /run/bootc-status.json",
-	}
-}
-
 func (c *client) IsBootcHost(ctx context.Context) bool {
-	_, err := c.runner.Run(ctx, "nsenter", hostExecArgs("bootc", "status", "--json")...)
+	_, err := c.runner.Run(ctx, "bootc", "status", "--json")
 	return err == nil
 }
 
 func (c *client) Status(ctx context.Context) (*Host, error) {
-	out, err := c.runner.Run(ctx, "nsenter", hostStatusArgs()...)
+	out, err := c.runner.Run(ctx, "bootc", "status", "--json")
 	if err != nil {
 		return nil, fmt.Errorf("running bootc status: %w", err)
 	}
@@ -147,7 +114,7 @@ func (c *client) Status(ctx context.Context) (*Host, error) {
 }
 
 func (c *client) Switch(ctx context.Context, image string) error {
-	_, err := c.runner.Run(ctx, "nsenter", hostExecArgs("bootc", "switch", image)...)
+	_, err := c.runner.Run(ctx, "bootc", "switch", image)
 	if err != nil {
 		return fmt.Errorf("running bootc switch: %w", err)
 	}
@@ -155,7 +122,7 @@ func (c *client) Switch(ctx context.Context, image string) error {
 }
 
 func (c *client) UpgradeDownloadOnly(ctx context.Context) error {
-	_, err := c.runner.Run(ctx, "nsenter", hostExecArgs("bootc", "upgrade", "--download-only")...)
+	_, err := c.runner.Run(ctx, "bootc", "upgrade", "--download-only")
 	if err != nil {
 		return fmt.Errorf("running bootc upgrade --download-only: %w", err)
 	}
@@ -163,11 +130,11 @@ func (c *client) UpgradeDownloadOnly(ctx context.Context) error {
 }
 
 func (c *client) UpgradeApply(ctx context.Context, softReboot bool) error {
-	args := []string{"bootc", "upgrade", "--from-downloaded", "--apply"}
+	args := []string{"upgrade", "--from-downloaded", "--apply"}
 	if softReboot {
 		args = append(args, "--soft-reboot=auto")
 	}
-	_, err := c.runner.Run(ctx, "nsenter", hostExecArgs(args[0], args[1:]...)...)
+	_, err := c.runner.Run(ctx, "bootc", args...)
 	if err != nil {
 		return fmt.Errorf("running bootc upgrade --apply: %w", err)
 	}
@@ -175,21 +142,54 @@ func (c *client) UpgradeApply(ctx context.Context, softReboot bool) error {
 }
 
 func (c *client) Rollback(ctx context.Context, apply bool) error {
-	args := []string{"bootc", "rollback"}
+	args := []string{"rollback"}
 	if apply {
 		args = append(args, "--apply")
 	}
-	_, err := c.runner.Run(ctx, "nsenter", hostExecArgs(args[0], args[1:]...)...)
+	_, err := c.runner.Run(ctx, "bootc", args...)
 	if err != nil {
 		return fmt.Errorf("running bootc rollback: %w", err)
 	}
 	return nil
 }
 
-// nsenterRunner executes commands directly via os/exec.
-type nsenterRunner struct{}
+// chrootRunner executes commands inside a chroot using
+// syscall.Chroot. The `container` environment variable is cleared
+// before execution so that bootc does not detect a container context.
+//
+// The chroot + exec is done in a child process (via exec.Command)
+// rather than in the current process, so the daemon's own root is
+// not affected.
+type chrootRunner struct {
+	root string
+}
 
-func (r *nsenterRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+func (r *chrootRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	// Point to the binary inside the rootfs so exec.Command can stat
+	// it. After the chroot, the kernel resolves the post-chroot path
+	// (/usr/bin/<name>) for execve.
+	hostBin := r.root + "/usr/bin/" + name
+	cmd := exec.CommandContext(ctx, hostBin, args...)
+	cmd.Path = "/usr/bin/" + name
+	// Chroot the child process into the host rootfs before exec.
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Chroot: r.root,
+	}
+	// Clear the `container` env var so bootc doesn't think it's in a
+	// container. Container runtimes set container=oci which causes
+	// bootc to return reduced status (null booted entry).
+	cmd.Env = filterEnv(os.Environ(), "container")
 	return cmd.CombinedOutput()
+}
+
+// filterEnv returns a copy of env with the named variable removed.
+func filterEnv(env []string, name string) []string {
+	prefix := name + "="
+	result := make([]string, 0, len(env))
+	for _, e := range env {
+		if !strings.HasPrefix(e, prefix) {
+			result = append(result, e)
+		}
+	}
+	return result
 }
