@@ -4,6 +4,10 @@ metadata:
   labels:
     app.kubernetes.io/name: bootc-operator
     app.kubernetes.io/managed-by: kustomize
-  name: bootcnode-sample
+  name: worker-1
+# spec is normally set by the operator when a BootcNodePool claims this
+# node. This example shows what a claimed BootcNode looks like.
 spec:
-  # TODO(user): Add fields here
+  desiredImage: "quay.io/example/my-bootc-image@sha256:abc123def456..."
+  desiredPhase: Staged
+  rebootPolicy: Auto

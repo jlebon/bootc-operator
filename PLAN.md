@@ -1007,7 +1007,7 @@ Set up the kubebuilder project structure and extend it for the dual-binary
 Define all API types with proper kubebuilder markers and OpenShift API
 conventions.
 
-- [ ] `api/v1alpha1/bootcnodepool_types.go`:
+- [x] `api/v1alpha1/bootcnodepool_types.go`:
       - `BootcNodePool`, `BootcNodePoolSpec`, `BootcNodePoolStatus`
       - `RolloutConfig`, `DisruptionConfig`, `HealthCheckConfig`
       - `ImagePullSecretReference`
@@ -1016,16 +1016,16 @@ conventions.
       - kubebuilder markers: validation, printcolumns, subresource, scope
       - Godoc following OpenShift conventions (lowercase field names,
         document omitted behavior, validation in prose + markers)
-- [ ] `api/v1alpha1/bootcnode_types.go`:
+- [x] `api/v1alpha1/bootcnode_types.go`:
       - `BootcNode`, `BootcNodeSpec`, `BootcNodeStatus`, `BootEntryStatus`
       - Enum types: `BootcNodeDesiredPhase`, `BootcNodePhase`
       - Spec fields are `+optional` (empty when no pool assigned)
       - ownerReference → Node (documented in godoc, enforced in daemon code)
       - `bootc.dev/pool` label for pool association (documented in godoc)
       - printcolumn for Pool label
-- [ ] `api/v1alpha1/groupversion_info.go`: verify SchemeBuilder is correct
-- [ ] Run `make manifests generate` → verify CRD YAMLs in `config/crd/bases/`
-- [ ] Create `config/samples/bootcnodepool_v1alpha1.yaml` (example CR)
+- [x] `api/v1alpha1/groupversion_info.go`: verify SchemeBuilder is correct
+- [x] Run `make manifests generate` → verify CRD YAMLs in `config/crd/bases/`
+- [x] Create `config/samples/bootcnodepool_v1alpha1.yaml` (example CR)
 
 ### 3. bootc client library
 
