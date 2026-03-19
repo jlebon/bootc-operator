@@ -146,15 +146,21 @@ Responsibilities:
 - Verify staging is still valid before reporting Staged (handle the case where
   a `--download-only` staged image was garbage collected due to unexpected
   reboot)
-- Execute reboots when instructed (via `systemctl reboot` or soft reboot)
+- Execute reboots when instructed (`bootc upgrade --apply` and
+  `bootc rollback --apply` both trigger reboots directly; no separate
+  `systemctl reboot` call is needed)
 
-The daemon pod runs with `hostPID: true` and `privileged: true`. All
-bootc and systemctl commands are executed via `nsenter -t 1 -m --`
-(enter PID 1's mount namespace), so bootc sees the host filesystem
-(ostree repo, container storage, boot loader config). This is the
-same pattern kured uses for reboots and the MCO MCD uses for bootc.
-For authenticated image pulls, the daemon writes the pull secret to
-`/run/ostree/auth.json` on the host (via nsenter) before running bootc.
+The daemon pod runs with `privileged: true` and the host root filesystem
+mounted at `/run/rootfs` (hostPath volume with HostToContainer
+propagation). All bootc commands are executed via `chroot /run/rootfs`
+(using Go's `SysProcAttr.Chroot`) with the `container` environment
+variable cleared. This is necessary because container runtimes set
+`container=oci`, which bootc checks to detect container context and
+returns reduced status (null booted entry). `nsenter -t 1 -m` alone
+is insufficient because it inherits the caller's environment.
+`hostPID: true` is NOT needed. For authenticated image pulls, the daemon
+writes the pull secret to `/run/ostree/auth.json` on the host (via the
+rootfs mount) before running bootc.
 
 RBAC grants `get`/`create`/`update` on all BootcNode resources (needs
 `create` to bootstrap its own BootcNode). The daemon enforces
@@ -587,6 +593,21 @@ const (
 // BootcNodeStatus reflects the observed bootc state on a node, as
 // reported by the daemon from `bootc status --json`.
 type BootcNodeStatus struct {
+    // trackedImage is the container image reference that bootc is
+    // currently tracking on this node (i.e. what `bootc switch` was
+    // last called with, or what the node was provisioned with). This
+    // is the tag-based reference that bootc follows for updates.
+    // Reported from `bootc status --json` spec.image field.
+    // +optional
+    TrackedImage string `json:"trackedImage,omitempty"`
+
+    // bootedDigest is the resolved digest of the image currently
+    // booted on this node (e.g. "sha256:abc123..."). This allows the
+    // operator to compare the exact running image against the desired
+    // digest without parsing the full booted BootEntryStatus.
+    // +optional
+    BootedDigest string `json:"bootedDigest,omitempty"`
+
     // booted is the bootc deployment that the node is currently running.
     // +optional
     Booted BootEntryStatus `json:"booted,omitempty,omitzero"`
@@ -833,13 +854,13 @@ bootc-operator/
 │   │   └── rollout.go                    # Rollout orchestration logic
 │   └── daemon/                   # Daemon logic (manual, not kubebuilder)
 │       ├── daemon.go             # Poll loop + state machine
-│       ├── bootc.go              # bootc CLI wrapper (host nsenter)
-│       └── reboot.go             # Reboot execution
+│       └── kubeclient.go         # KubeClient interface for BootcNode ops
 ├── pkg/                          # Importable packages (for MCO)
 │   ├── bootc/                    # bootc CLI interface
-│   │   ├── client.go             # Execute bootc commands
+│   │   ├── client.go             # CommandRunner interface + chroot impl
 │   │   ├── types.go              # Parsed bootc status types
-│   │   └── status.go             # Status parsing
+│   │   ├── status.go             # Status parsing + helpers
+│   │   └── auth.go               # Write/remove auth file on host
 │   └── drain/                    # Drain coordination (wraps kubectl drain)
 │       └── drain.go
 ├── config/                       # Kustomize manifests (kubebuilder-managed)
@@ -891,23 +912,25 @@ docker-build-daemon:
 
 ### Dockerfile
 
-Multi-target Dockerfile that builds both binaries:
+Multi-target Dockerfile that builds both binaries. Uses hummingbird
+core-runtime as the base image (minimal, hardened, Red Hat-aligned
+distroless image):
 ```dockerfile
 FROM golang:1.25 AS builder
 # ... build both cmd/operator and cmd/daemon
 
-FROM gcr.io/distroless/static:nonroot AS operator
+FROM quay.io/hummingbird/core-runtime:latest AS operator
 COPY --from=builder /workspace/bin/operator /manager
 
-FROM gcr.io/distroless/static:nonroot AS daemon
+FROM quay.io/hummingbird/core-runtime:latest AS daemon
 COPY --from=builder /workspace/bin/daemon /daemon
-COPY --from=builder /usr/bin/nsenter /usr/bin/nsenter
 ```
 
-Note: Both images use distroless. The daemon only needs `nsenter` in the
-container -- all host commands (bootc, systemctl) are executed via
-`nsenter -t 1 -m --` which uses the host's binaries. The daemon runs
-with elevated privileges (`hostPID: true`, `privileged: true`).
+Note: Both images use hummingbird core-runtime (minimal glibc-based
+distroless). The daemon needs no extra tools -- all host commands
+(bootc) are executed via chroot into the host rootfs using Go's
+`SysProcAttr.Chroot`. The daemon runs with elevated privileges
+(`privileged: true`, host rootfs at `/run/rootfs`).
 
 ## Edge Cases
 
@@ -963,11 +986,11 @@ Set up the kubebuilder project structure and extend it for the dual-binary
       placeholder poll loop)
 - [ ] Add `Makefile` targets: `build-daemon`, `docker-build-daemon`
 - [ ] Create multi-target `Dockerfile` (operator + daemon stages, both
-      distroless; daemon includes nsenter)
+      use `quay.io/hummingbird/core-runtime:latest`)
 - [ ] Create `config/daemon/` directory with:
-      - `daemonset.yaml` (`hostPID: true`, `privileged: true`,
-        `nodeAffinity` with `DoesNotExist` on `node.bootc.dev/skip`,
-        nsenter binary included)
+      - `daemonset.yaml` (`privileged: true`, host rootfs at `/run/rootfs`
+        via hostPath volume, `nodeAffinity` with `DoesNotExist` on
+        `node.bootc.dev/skip`, `NODE_NAME` env from downward API)
       - `service_account.yaml`
       - `kustomization.yaml`
 - [ ] Create daemon RBAC in `config/rbac/`:
@@ -975,6 +998,8 @@ Set up the kubebuilder project structure and extend it for the dual-binary
         `bootcnodes`, `get` on `nodes`)
       - `daemon_role_binding.yaml`
 - [ ] Wire `config/default/kustomization.yaml` to include daemon resources
+- [ ] Rename namespace from `bootc-operator-system` (kubebuilder default)
+      to `bootc-operator` in `config/default/kustomization.yaml`
 - [ ] Verify `make manifests generate build` passes
 
 ### 2. CRD types
@@ -1005,27 +1030,34 @@ conventions.
 ### 3. bootc client library
 
 `pkg/bootc/` -- Go wrapper for the bootc CLI. Used by the daemon to
-execute bootc commands on the host via nsenter.
+execute bootc commands on the host via chroot into the host rootfs.
+Uses a `CommandRunner` interface for testability.
 
 - [ ] `pkg/bootc/types.go`: Go types matching the `org.containers.bootc/v1`
       BootcHost JSON schema (booted/staged/rollback deployments, image refs,
       versions, timestamps, softRebootCapable)
-- [ ] `pkg/bootc/client.go`: `BootcClient` struct with methods:
-      - `NewBootcClient(nsenterPath string)` constructor
-      - `Status() (*BootcHost, error)` -- runs `bootc status --json`, parses
-      - `Switch(image string) error` -- runs `bootc switch <image>`
-      - `UpgradeDownloadOnly() error` -- runs `bootc upgrade --download-only`
-      - `UpgradeApply(softReboot bool) error` -- runs `bootc upgrade
+- [ ] `pkg/bootc/client.go`: `Client` interface + implementation:
+      - `CommandRunner` interface: `Run(ctx, name, args...) ([]byte, error)`.
+        Default impl: `chrootRunner` that uses `SysProcAttr.Chroot` to
+        exec commands inside `/run/rootfs` with `container` env var cleared.
+      - `NewClient()` constructor (uses chrootRunner with `/run/rootfs`)
+      - `NewClientWithRunner(runner)` for testing with mock runner
+      - `Status(ctx) (*Host, error)` -- runs `bootc status --json`, parses
+      - `Switch(ctx, image) error` -- runs `bootc switch <image>`
+      - `UpgradeDownloadOnly(ctx) error` -- runs `bootc upgrade --download-only`
+      - `UpgradeApply(ctx, softReboot) error` -- runs `bootc upgrade
         --from-downloaded [--soft-reboot=auto] --apply`
-      - `Rollback(apply bool) error` -- runs `bootc rollback [--apply]`
-      - `IsBootcHost() bool` -- returns true if bootc is available
-      - Internal: `nsenterExec(args ...string)` helper that prefixes
-        commands with `nsenter -t 1 -m --`
-- [ ] `pkg/bootc/auth.go`: `WriteAuthFile(secret []byte) error` -- writes
-      dockerconfigjson to `/run/ostree/auth.json` on the host via nsenter
+      - `Rollback(ctx, apply) error` -- runs `bootc rollback [--apply]`
+      - `IsBootcHost(ctx) bool` -- returns true if bootc is available
+- [ ] `pkg/bootc/auth.go`: `WriteAuthFile(ctx, runner, data) error` -- writes
+      dockerconfigjson to `/run/ostree/auth.json` on the host via the rootfs
+      mount. `RemoveAuthFile(ctx, runner) error` for cleanup.
 - [ ] `pkg/bootc/status.go`: JSON parsing logic, mapping BootcHost fields
-      to our `BootEntryStatus` API type
-- [ ] Unit tests for JSON parsing (mock `bootc status --json` output)
+      to our `BootEntryStatus` API type. Helpers: `ToBootEntryStatus`,
+      `ToBootcNodeStatus`, `HasStagedImage`, `StagedImageRef`,
+      `BootedImageRef`, `IsDownloadOnly`
+- [ ] Unit tests for JSON parsing, client commands (mock runner), status
+      mapping
 
 ### 4. Daemon
 
@@ -1157,13 +1189,20 @@ execute bootc commands on the host via nsenter.
 
 ### 9. Auto rollback
 
-- [ ] Operator: after setting desiredPhase=Rebooting on a BootcNode, start
-      a timer (healthCheck.timeout).
-- [ ] On each reconcile: if the node hasn't reached Ready within the
-      timeout, set desiredPhase=RollingBack.
+- [ ] Operator: when advancing a BootcNode to desiredPhase=Rebooting,
+      set a `bootc.dev/rebooting-since` annotation with the current
+      RFC3339 timestamp. This is level-based (survives operator restarts).
+- [ ] On each reconcile: `checkRebootTimeouts()` compares the annotation
+      timestamp against `healthCheck.timeout`. If exceeded, set
+      desiredPhase=RollingBack.
 - [ ] Daemon: handle RollingBack phase → run `bootc rollback --apply`.
-- [ ] Operator: if rollback succeeds (node comes back on old image), mark
-      BootcNode as Error, set pool Degraded, stop rollout.
+- [ ] Operator: `handleCompletedRollbacks()` detects nodes that completed
+      rollback (desiredPhase=RollingBack, status.Phase=Ready, booted
+      image != desired). Uncordons the node, clears the rebooting-since
+      annotation, resets desiredPhase=Staged, sets status.Phase=Error.
+      This triggers Degraded condition on the pool, stopping rollout.
+- [ ] On successful reboot: `uncordonReadyNodes()` clears the
+      rebooting-since annotation.
 - [ ] If rollback fails (node unreachable): bootloader falls back
       automatically (A/B boot). Operator detects old image in BootcNode
       status after node returns.
