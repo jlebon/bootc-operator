@@ -2,6 +2,10 @@
 # Test runner for bootc-operator k8s tests.
 # Discovers test-*.sh scripts and runs each in a fresh FCOS VM
 # with a single-node Kubernetes cluster.
+#
+# The entire repo is mounted into the VM via virtiofs at /var/mnt,
+# giving tests access to pre-built container images, kustomize
+# manifests, and other project files.
 set -euo pipefail
 
 usage() {
@@ -13,6 +17,7 @@ Run Kubernetes e2e tests on FCOS VMs.
 Options:
     -v, --verbose        Show test output in real-time (default: only on failure)
     --output-dir DIR     Directory for test artifacts (default: \${SCRIPT_DIR}/results)
+    --skip-build         Skip building operator/daemon container images
     -h, --help           Show this help message
 
 Arguments:
@@ -22,11 +27,14 @@ Arguments:
 Examples:
     $(basename "$0")                    # Run all tests
     $(basename "$0") smoke              # Run only test-smoke.sh
-    $(basename "$0") -v smoke           # Run with verbose output
+    $(basename "$0") -v rollout         # Run with verbose output
+    $(basename "$0") --skip-build smoke # Skip image build (use cached)
 EOF
 }
 
-IMAGE_TAG="${IMAGE_TAG:-bootc-operator-test-k8s}"
+VM_IMAGE_TAG="${VM_IMAGE_TAG:-bootc-operator-test-k8s}"
+OPERATOR_IMG="${OPERATOR_IMG:-localhost/bootc-operator:test}"
+DAEMON_IMG="${DAEMON_IMG:-localhost/bootc-daemon:test}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -34,6 +42,7 @@ cd "${SCRIPT_DIR}"
 
 ONLY_TESTS=()
 VERBOSE=false
+SKIP_BUILD=false
 output_dir="${SCRIPT_DIR}/results"
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -49,6 +58,10 @@ while [[ $# -gt 0 ]]; do
             output_dir="$2"
             shift 2
             ;;
+        --skip-build)
+            SKIP_BUILD=true
+            shift
+            ;;
         -*)
             echo "Error: Unknown option: $1" >&2
             echo "Try '$(basename "$0") --help' for more information." >&2
@@ -61,11 +74,39 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Build test image if needed
-if ! podman image exists "${IMAGE_TAG}"; then
-    echo "Building test image ${IMAGE_TAG}..."
-    podman build -t "${IMAGE_TAG}" "${SCRIPT_DIR}/k8s/"
+# Build VM test image if needed
+if ! podman image exists "${VM_IMAGE_TAG}"; then
+    echo "Building VM test image ${VM_IMAGE_TAG}..."
+    podman build -t "${VM_IMAGE_TAG}" "${SCRIPT_DIR}/k8s/"
 fi
+
+# Build operator and daemon container images and save as OCI archives
+# so tests can import them into the VM's containerd.
+artifacts_dir="${SCRIPT_DIR}/.artifacts"
+if [[ "${SKIP_BUILD}" == false ]]; then
+    echo "Building operator and daemon container images..."
+    mkdir -p "${artifacts_dir}"
+    podman build -t "${OPERATOR_IMG}" --target operator "${REPO_DIR}"
+    podman build -t "${DAEMON_IMG}" --target daemon "${REPO_DIR}"
+    podman save --format oci-archive -o "${artifacts_dir}/operator.tar" "${OPERATOR_IMG}"
+    podman save --format oci-archive -o "${artifacts_dir}/daemon.tar" "${DAEMON_IMG}"
+    echo "Container images saved to ${artifacts_dir}/"
+fi
+
+# Generate install.yaml for deploying into the VM cluster.
+echo "Generating install.yaml..."
+mkdir -p "${artifacts_dir}"
+make -C "${REPO_DIR}" manifests generate kustomize 2>&1 | tail -1
+(
+    cd "${REPO_DIR}/config/manager"
+    "${REPO_DIR}/bin/kustomize" edit set image "controller=${OPERATOR_IMG}"
+)
+"${REPO_DIR}/bin/kustomize" build "${REPO_DIR}/config/default" > "${artifacts_dir}/install.yaml"
+# Restore the kustomization.yaml to avoid polluting the repo.
+git -C "${REPO_DIR}" checkout config/manager/kustomization.yaml 2>/dev/null || true
+# Patch the install.yaml to use the correct daemon image reference.
+sed -i "s|value: daemon:latest|value: ${DAEMON_IMG}|g" "${artifacts_dir}/install.yaml"
+echo "install.yaml generated at ${artifacts_dir}/install.yaml"
 
 # Find test scripts
 if [[ ${#ONLY_TESTS[@]} -gt 0 ]]; then
@@ -109,10 +150,12 @@ for test in "${tests[@]}"; do
         exec 3>"${test_output_dir}/runner.log"
     fi
 
+    # Mount the entire repo as /mnt so the VM has access to
+    # pre-built images, manifests, and test scripts.
     rc=0
     podman run --rm --privileged \
-        -v "${SCRIPT_DIR}:/mnt" \
-        "${IMAGE_TAG}" run "/mnt/${test}" >&3 2>&3 || rc=$?
+        -v "${REPO_DIR}:/mnt" \
+        "${VM_IMAGE_TAG}" run "/mnt/tests/${test}" >&3 2>&3 || rc=$?
 
     if [[ ${rc} -eq 0 ]]; then
         echo "=== PASSED: ${test} ==="

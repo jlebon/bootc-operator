@@ -1,5 +1,6 @@
 /.opencode/plans
 /tests/results/
+/tests/.artifacts/
 
 # Build artifacts
 /bin/

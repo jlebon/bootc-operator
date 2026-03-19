@@ -60,9 +60,18 @@ type CommandRunner interface {
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
+// nsenterPrefix is the set of nsenter flags used to enter PID 1's
+// namespaces. All bootc commands run via nsenter so they see the host
+// filesystem, network, IPC, and UTS. This is necessary because
+// bootc reads system state from /sysroot, /ostree, and D-Bus -- all
+// of which require the full host namespace context, not just the mount
+// namespace.
+var nsenterPrefix = []string{"-t", "1", "-m", "-u", "-i", "-n", "-p", "--"}
+
 // NewClient creates a Client that executes bootc commands on the host
 // via nsenter. All commands are prefixed with
-// `nsenter -t 1 -m -- <command>` to enter PID 1's mount namespace.
+// `nsenter -t 1 -m -u -i -n -p -- <command>` to enter PID 1's
+// namespaces.
 func NewClient() Client {
 	return &client{runner: &nsenterRunner{}}
 }
@@ -77,26 +86,36 @@ type client struct {
 	runner CommandRunner
 }
 
+// nsenterArgs builds the full nsenter argument list by prepending the
+// nsenter prefix to the given command and its arguments.
+func nsenterArgs(cmd string, args ...string) []string {
+	result := make([]string, 0, len(nsenterPrefix)+1+len(args))
+	result = append(result, nsenterPrefix...)
+	result = append(result, cmd)
+	result = append(result, args...)
+	return result
+}
+
 func (c *client) IsBootcHost(ctx context.Context) bool {
-	_, err := c.runner.Run(ctx, "nsenter", "-t", "1", "-m", "--", "bootc", "status", "--json")
+	_, err := c.runner.Run(ctx, "nsenter", nsenterArgs("bootc", "status", "--json")...)
 	return err == nil
 }
 
 func (c *client) Status(ctx context.Context) (*Host, error) {
-	out, err := c.runner.Run(ctx, "nsenter", "-t", "1", "-m", "--", "bootc", "status", "--json")
+	out, err := c.runner.Run(ctx, "nsenter", nsenterArgs("bootc", "status", "--json")...)
 	if err != nil {
 		return nil, fmt.Errorf("running bootc status: %w", err)
 	}
 
 	var host Host
 	if err := json.Unmarshal(out, &host); err != nil {
-		return nil, fmt.Errorf("parsing bootc status JSON: %w", err)
+		return nil, fmt.Errorf("parsing bootc status JSON (len=%d): %w", len(out), err)
 	}
 	return &host, nil
 }
 
 func (c *client) Switch(ctx context.Context, image string) error {
-	_, err := c.runner.Run(ctx, "nsenter", "-t", "1", "-m", "--", "bootc", "switch", image)
+	_, err := c.runner.Run(ctx, "nsenter", nsenterArgs("bootc", "switch", image)...)
 	if err != nil {
 		return fmt.Errorf("running bootc switch: %w", err)
 	}
@@ -104,7 +123,7 @@ func (c *client) Switch(ctx context.Context, image string) error {
 }
 
 func (c *client) UpgradeDownloadOnly(ctx context.Context) error {
-	_, err := c.runner.Run(ctx, "nsenter", "-t", "1", "-m", "--", "bootc", "upgrade", "--download-only")
+	_, err := c.runner.Run(ctx, "nsenter", nsenterArgs("bootc", "upgrade", "--download-only")...)
 	if err != nil {
 		return fmt.Errorf("running bootc upgrade --download-only: %w", err)
 	}
@@ -112,11 +131,11 @@ func (c *client) UpgradeDownloadOnly(ctx context.Context) error {
 }
 
 func (c *client) UpgradeApply(ctx context.Context, softReboot bool) error {
-	args := []string{"-t", "1", "-m", "--", "bootc", "upgrade", "--from-downloaded", "--apply"}
+	args := []string{"bootc", "upgrade", "--from-downloaded", "--apply"}
 	if softReboot {
 		args = append(args, "--soft-reboot=auto")
 	}
-	_, err := c.runner.Run(ctx, "nsenter", args...)
+	_, err := c.runner.Run(ctx, "nsenter", nsenterArgs(args[0], args[1:]...)...)
 	if err != nil {
 		return fmt.Errorf("running bootc upgrade --apply: %w", err)
 	}
@@ -124,11 +143,11 @@ func (c *client) UpgradeApply(ctx context.Context, softReboot bool) error {
 }
 
 func (c *client) Rollback(ctx context.Context, apply bool) error {
-	args := []string{"-t", "1", "-m", "--", "bootc", "rollback"}
+	args := []string{"bootc", "rollback"}
 	if apply {
 		args = append(args, "--apply")
 	}
-	_, err := c.runner.Run(ctx, "nsenter", args...)
+	_, err := c.runner.Run(ctx, "nsenter", nsenterArgs(args[0], args[1:]...)...)
 	if err != nil {
 		return fmt.Errorf("running bootc rollback: %w", err)
 	}

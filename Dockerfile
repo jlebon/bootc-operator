@@ -25,8 +25,13 @@ COPY --from=builder /workspace/manager .
 USER 65532:65532
 ENTRYPOINT ["/manager"]
 
-# Daemon image -- runs privileged on the host with nsenter access
-FROM gcr.io/distroless/static:nonroot AS daemon
+# Daemon image -- runs privileged on the host with nsenter access.
+# Uses fedora-minimal for nsenter (util-linux), which is needed to
+# enter PID 1's mount namespace and run bootc commands on the host
+# filesystem.
+FROM quay.io/fedora/fedora-minimal AS daemon
+RUN microdnf install -y --setopt=install_weak_deps=0 util-linux-core && \
+    microdnf clean all
 WORKDIR /
 COPY --from=builder /workspace/daemon .
 ENTRYPOINT ["/daemon"]
