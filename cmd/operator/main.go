@@ -188,15 +188,52 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Read the operator namespace and daemon image from environment
+	// variables. These are set on the operator Deployment by the
+	// installation manifests.
+	operatorNamespace := os.Getenv("OPERATOR_NAMESPACE")
+	if operatorNamespace == "" {
+		operatorNamespace = "bootc-operator"
+	}
+
+	daemonImage := os.Getenv("DAEMON_IMAGE")
+	if daemonImage == "" {
+		setupLog.Error(nil, "DAEMON_IMAGE environment variable is required")
+		os.Exit(1)
+	}
+
 	if err := (&controller.BootcNodePoolReconciler{
-		Client:         mgr.GetClient(),
-		Scheme:         mgr.GetScheme(),
-		DigestResolver: controller.NewDigestResolver(),
-		Drainer:        drain.New(clientset, drain.Options{}),
+		Client:            mgr.GetClient(),
+		Scheme:            mgr.GetScheme(),
+		DigestResolver:    controller.NewDigestResolver(),
+		Drainer:           drain.New(clientset, drain.Options{}),
+		OperatorNamespace: operatorNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "BootcNodePool")
 		os.Exit(1)
 	}
+
+	// Set up the DaemonSet reconciler to manage the daemon DaemonSet.
+	// The reconciler ensures the DaemonSet exists with the correct
+	// image and watches for drift.
+	dsReconciler := &controller.DaemonSetReconciler{
+		Client:    mgr.GetClient(),
+		Scheme:    mgr.GetScheme(),
+		Namespace: operatorNamespace,
+		Image:     daemonImage,
+	}
+	if err := dsReconciler.SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "DaemonSet")
+		os.Exit(1)
+	}
+
+	// Bootstrap the DaemonSet at startup. This runs after the manager's
+	// cache is started, ensuring the client is ready.
+	if err := mgr.Add(dsReconciler); err != nil {
+		setupLog.Error(err, "Failed to add DaemonSet bootstrapper")
+		os.Exit(1)
+	}
+
 	// +kubebuilder:scaffold:builder
 
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {

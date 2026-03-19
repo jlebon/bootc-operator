@@ -1141,8 +1141,20 @@ Uses a `CommandRunner` interface for testability.
       `Watches(Node, findPoolsForNode)`
 - [x] RBAC markers (bootcnodepools, bootcnodes, nodes, secrets, events,
       pods, pods/eviction)
-- [ ] Deploy daemon DaemonSet: reconcile the DaemonSet as an owned resource
-      (create/update from `DAEMON_IMAGE` env var)
+- [x] Deploy daemon DaemonSet: reconcile the DaemonSet as an owned resource
+      (create/update from `DAEMON_IMAGE` env var). Implemented as a separate
+      `DaemonSetReconciler` in `internal/controller/daemonset.go` that:
+      - Creates the daemon DaemonSet and ServiceAccount programmatically
+      - Watches the DaemonSet for drift and reconciles image changes
+      - Reads `DAEMON_IMAGE` env var from operator Deployment
+      - Bootstraps at startup via `manager.Runnable` interface
+      - Removed static `daemonset.yaml` from Kustomize (operator manages it)
+      - Updated RBAC: added `apps/daemonsets` CRUD and
+        `serviceaccounts` create/get/list/watch/update/patch
+      - Updated Makefile `deploy` and `build-installer` targets to set
+        daemon image in operator env var
+      - Unit tests: 9 tests covering create, idempotency, image update,
+        drift correction, label/resource/security verification
 - [x] Digest resolution: `internal/controller/digest.go` using
       `go-containerregistry` (`remote.Head`), with optional
       auth from `imagePullSecret`. Includes `DigestResolver` interface

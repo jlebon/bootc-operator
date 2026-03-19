@@ -2,4 +2,8 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:
   - service_account.yaml
-  - daemonset.yaml
+  # The DaemonSet is created and managed programmatically by the
+  # operator controller (internal/controller/daemonset.go), not
+  # deployed as a static manifest. The operator reads the DAEMON_IMAGE
+  # env var from its own Deployment and creates the DaemonSet at
+  # startup.
