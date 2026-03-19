@@ -1109,16 +1109,17 @@ Uses a `CommandRunner` interface for testability.
 
 `internal/controller/bootcnodepool_controller.go` -- the main reconciler.
 
-- [ ] Reconcile function (kubebuilder deploy-image pattern):
+- [x] Reconcile function (kubebuilder deploy-image pattern):
       1. Fetch BootcNodePool CR
       2. If not found → return
       3. Initialize status conditions if empty (Available, Progressing,
          Degraded → Unknown)
       4. Add finalizer (`bootc.dev/cleanup`) if not present
       5. Handle deletion (DeletionTimestamp set):
-         - Uncordon any drained nodes
          - Release all claimed BootcNodes (clear spec + pool label)
          - Remove finalizer
+         - Note: uncordoning drained nodes deferred to drain manager
+           (item 7)
       6. Resolve image tag → digest (go-containerregistry)
       7. List BootcNodes; match against pool's nodeSelector by looking up
          each BootcNode's corresponding Node
@@ -1127,44 +1128,57 @@ Uses a `CommandRunner` interface for testability.
       9. Claim matching BootcNodes (set spec.desiredImage,
          spec.desiredPhase=Staged, add `bootc.dev/pool` label)
       10. Release non-matching BootcNodes (clear spec + pool label)
-      11. Orchestrate rollout (delegate to rollout.go)
-      12. Re-fetch CR before status update
-      13. Update status (phase, counters, conditions)
-      14. Return with RequeueAfter for periodic tag re-resolution
-- [ ] `SetupWithManager`: `For(BootcNodePool)`,
+      11. Orchestrate rollout: wait for all nodes to stage, then
+          advance batches to Rebooting (respecting maxUnavailable)
+      12. Re-list nodes + re-compute status after orchestration
+      13. Re-fetch CR before status update (avoid conflict errors)
+      14. Update status (phase, counters, conditions)
+      15. Return with RequeueAfter for periodic tag re-resolution
+      Note: rollout orchestration is inline in the controller for now.
+      A separate `rollout.go` file can be extracted later if needed.
+- [x] `SetupWithManager`: `For(BootcNodePool)`,
       `Watches(BootcNode, findPoolsForBootcNode)`,
       `Watches(Node, findPoolsForNode)`
-- [ ] RBAC markers (bootcnodepools, bootcnodes, nodes, pods, pods/eviction,
-      events)
+- [x] RBAC markers (bootcnodepools, bootcnodes, nodes, secrets, events)
+      Note: pods/pods/eviction RBAC deferred to drain manager (item 7)
 - [ ] Deploy daemon DaemonSet: reconcile the DaemonSet as an owned resource
       (create/update from `DAEMON_IMAGE` env var)
-- [ ] Digest resolution: `internal/controller/digest.go` using
-      `go-containerregistry` (`remote.Image`, `remote.Head`), with optional
-      auth from `imagePullSecret`
+- [x] Digest resolution: `internal/controller/digest.go` using
+      `go-containerregistry` (`remote.Head`), with optional
+      auth from `imagePullSecret`. Includes `DigestResolver` interface
+      for testability with `fakeDigestResolver` in tests.
+- [x] Unit tests with envtest (18 tests, 70.0% coverage):
+      - Initialize conditions and finalizer
+      - Claim matching BootcNodes
+      - Release BootcNodes when labels change
+      - Overlapping pool detection
+      - Deletion cleanup (release nodes, remove finalizer)
+      - Digest resolution failure handling
+      - Idle phase with no selector
+      - Ready phase when all nodes at desired image
+      - Rollout orchestration: advance staged nodes to Rebooting
+      - maxUnavailable limiting concurrent reboots
+      - extractDigestFromRef and imageWithDigest helpers
 
 ### 6. Rollout orchestration
 
-`internal/controller/rollout.go` -- stage-then-reboot strategy.
+Basic rollout orchestration is now inline in the BootcNodePool
+reconciler (`computeStatus` + `orchestrateRollout` methods). A separate
+`rollout.go` file was not needed -- the logic is compact enough to live
+in the controller.
 
-- [ ] `Orchestrate(pool, bootcNodes) (status, error)`:
-      - Count nodes by BootcNode phase (Ready, Staging, Staged, Rebooting,
-        Error)
+- [x] `computeStatus(pool, bootcNodes, resolvedDigest)`:
+      - Count nodes by BootcNode phase and spec.desiredPhase
       - Update BootcNodePool status counters (targetNodes, stagedNodes,
         readyNodes, updatingNodes)
-      - Determine pool phase:
-        - All ready + at desired image → Ready
-        - Any staging → Staging
-        - Any rebooting/draining → Rolling
-        - Any error → Degraded
-      - If phase = Staging: wait for all nodes to reach Staged
-      - If phase = Rolling or all Staged:
-        - Select next batch of Staged nodes (up to maxUnavailable minus
-          currently updating)
-        - For each selected node: cordon → drain → set
-          desiredPhase=Rebooting on BootcNode
-      - If phase = Rolling and node rebooted successfully: uncordon
-      - Staging re-verification: before selecting a node for reboot,
-        confirm its BootcNode status is still Staged
+      - Determine pool phase (Idle/Staging/Rolling/Ready/Degraded)
+      - Set conditions (Available, Progressing, Degraded)
+- [x] `orchestrateRollout(pool, bootcNodes, resolvedDigest)`:
+      - Wait for all nodes to reach Staged before starting reboots
+      - Select batch of Staged nodes (up to maxUnavailable minus
+        currently updating)
+      - Set desiredPhase=Rebooting on selected nodes
+      - Note: cordon/drain deferred to drain manager (item 7)
 - [ ] Health check: track time since desiredPhase was set to Rebooting.
       If node doesn't become Ready within healthCheck.timeout → trigger
       rollback (set desiredPhase=RollingBack)

@@ -179,8 +179,9 @@ func main() {
 	}
 
 	if err := (&controller.BootcNodePoolReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		DigestResolver: controller.NewDigestResolver(),
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "BootcNodePool")
 		os.Exit(1)
