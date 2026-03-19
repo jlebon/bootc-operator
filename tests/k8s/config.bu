@@ -153,8 +153,24 @@ systemd:
         ExecStart=/usr/local/bin/kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane-
         ExecStart=/usr/bin/mkdir -p /home/core/.kube
         ExecStart=/usr/bin/cp /etc/kubernetes/admin.conf /home/core/.kube/config
-        ExecStart=/usr/bin/chown core:core /home/core/.kube/config
+        ExecStart=/usr/bin/chown -R core:core /home/core/.kube
         ExecStart=/usr/local/bin/kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /etc/kubernetes/flannel.yml
+
+        [Install]
+        WantedBy=multi-user.target
+    # FCOS uses a strict signature verification policy. Rewrite the ostree
+    # origin file to use the unverified transport so that bootc/rpm-ostree
+    # can pull test images without signature checks.
+    - name: fix-ostree-origin.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Use unverified registry transport in ostree origin
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        ExecStart=/usr/bin/bash -c 'mount -o remount,rw /sysroot && sed -i s/ostree-image-signed/ostree-unverified-registry/ /ostree/deploy/fedora-coreos/deploy/*.origin; mount -o remount,ro /sysroot'
 
         [Install]
         WantedBy=multi-user.target

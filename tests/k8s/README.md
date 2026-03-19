@@ -51,6 +51,26 @@ podman run -it --rm --privileged -v $PWD:/mnt \
 # Inside the VM: ls /mnt/test-smoke.sh
 ```
 
+### Background cluster (for scripting/agents)
+
+Start a cluster in the background and run commands against it:
+
+```bash
+podman run -d --name k8s --privileged bootc-operator-test-k8s start
+
+# Wait for the cluster to be ready
+podman logs -f k8s
+
+# Run commands in the VM
+podman exec k8s /entrypoint.sh exec kubectl get pods -A
+
+# Interactive shell
+podman exec -it k8s /entrypoint.sh exec bash
+
+# Tear down
+podman rm -f k8s
+```
+
 ### Running a single test
 
 (This is usually driven by `tests/run.sh`.)

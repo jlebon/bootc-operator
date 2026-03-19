@@ -22,6 +22,8 @@ main() {
 
     case "${cmd}" in
         shell) cmd_shell "$@" ;;
+        start) cmd_start "$@" ;;
+        exec)  cmd_exec "$@" ;;
         run)   cmd_run "$@" ;;
         *)
             echo "ERROR: Unknown command: ${cmd}" >&2
@@ -35,6 +37,34 @@ cmd_shell() {
     startup
     echo "Kubernetes cluster is ready. Dropping into VM shell."
     exec ssh "${SSH_ARGS[@]}" -i "${WORKDIR}/id_ed25519" -p "${SSH_PORT}" core@localhost
+}
+
+cmd_start() {
+    startup
+    mkdir -p /run/vm
+    cp "${WORKDIR}/id_ed25519" /run/vm/id_ed25519
+    echo "Kubernetes cluster is ready. Use 'podman exec <container> /entrypoint.sh exec <cmd>' to run commands."
+    sleep infinity
+}
+
+cmd_exec() {
+    # Wait for the cluster to be ready. The SSH key is written by
+    # cmd_start after startup() completes, so its presence signals
+    # that the cluster is fully up.
+    local attempt
+    for attempt in {1..120}; do
+        [[ -f /run/vm/id_ed25519 ]] && break
+        sleep 5
+    done
+    if [[ ! -f /run/vm/id_ed25519 ]]; then
+        echo "ERROR: Timed out waiting for cluster to start (10 minutes)" >&2
+        exit 1
+    fi
+    if [[ $# -eq 0 ]]; then
+        exec ssh "${SSH_ARGS[@]}" -i /run/vm/id_ed25519 -p "${SSH_PORT}" core@localhost
+    else
+        exec ssh "${SSH_ARGS[@]}" -i /run/vm/id_ed25519 -p "${SSH_PORT}" core@localhost "$@"
+    fi
 }
 
 cmd_run() {
@@ -62,6 +92,8 @@ Usage: $(basename "$0") <command> [args...]
 
 Commands:
     shell               Boot VM and drop into an SSH shell
+    start               Boot VM and keep running in background
+    exec [cmd...]       Run a command in the VM (or open a shell if no cmd)
     run <script>        Boot VM and run a test script (e.g. /mnt/test-smoke.sh)
 
 The container must be run with:
