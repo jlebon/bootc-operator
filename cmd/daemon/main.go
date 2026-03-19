@@ -17,14 +17,19 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	"github.com/jlebon/bootc-operator/internal/daemon"
+	"github.com/jlebon/bootc-operator/pkg/bootc"
 )
 
 func main() {
@@ -52,9 +57,41 @@ func main() {
 
 	log.Info("Starting bootc-daemon", "node", nodeName, "pollInterval", pollInterval)
 
-	// Wait for signal to exit
+	// Set up in-cluster Kubernetes client.
+	config := ctrl.GetConfigOrDie()
+	kubeClient, err := daemon.NewKubeClient(config)
+	if err != nil {
+		log.Error(err, "Failed to create Kubernetes client")
+		os.Exit(1)
+	}
+
+	// Create the bootc client (executes commands via chroot into the
+	// host rootfs at /run/rootfs).
+	bootcClient := bootc.NewClient()
+
+	// Create the daemon and run it.
+	d := daemon.NewDaemon(
+		nodeName,
+		time.Duration(pollInterval)*time.Second,
+		kubeClient,
+		bootcClient,
+		log,
+	)
+
+	// Set up context with signal handling for graceful shutdown.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
-	sig := <-sigCh
-	log.Info("Received signal, shutting down", "signal", sig)
+	go func() {
+		sig := <-sigCh
+		log.Info("Received signal, shutting down", "signal", sig)
+		cancel()
+	}()
+
+	if err := d.Run(ctx); err != nil {
+		log.Error(err, "Daemon failed")
+		os.Exit(1)
+	}
 }

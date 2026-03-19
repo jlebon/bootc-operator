@@ -1066,7 +1066,7 @@ Uses a `CommandRunner` interface for testability.
 
 `cmd/daemon/main.go` + `internal/daemon/` -- the per-node agent.
 
-- [ ] `internal/daemon/daemon.go`: `Daemon` struct and main loop:
+- [x] `internal/daemon/daemon.go`: `Daemon` struct and main loop:
       - On startup: call `bootcClient.IsBootcHost()`. If false, log and
         stay idle (sleep forever).
       - On startup (bootc host): create BootcNode CRD if it doesn't
@@ -1091,15 +1091,19 @@ Uses a `CommandRunner` interface for testability.
         - `spec.desiredPhase=RollingBack`:
           - Run `bootc rollback --apply`
           - (node reboots)
-- [ ] `internal/daemon/bootc.go`: wiring between daemon state machine and
-      `pkg/bootc/` client
-- [ ] `internal/daemon/reboot.go`: reboot execution (nsenter systemctl
-      reboot, or bootc --apply handles it)
-- [ ] `cmd/daemon/main.go`: entrypoint. Parse flags (`--node-name` from
+      Note: `internal/daemon/bootc.go` and `internal/daemon/reboot.go`
+      were not needed as separate files -- the daemon state machine in
+      daemon.go directly uses `pkg/bootc.Client` (via the `BootcClient`
+      interface) and bootc's `--apply` flag handles reboots.
+- [x] `internal/daemon/kubeclient.go`: `KubeClient` interface for
+      BootcNode CRUD using client-go REST client (not controller-runtime).
+      Supports `GetBootcNode`, `CreateBootcNode`, `UpdateBootcNode`,
+      `UpdateBootcNodeStatus`, `GetNode`.
+- [x] `cmd/daemon/main.go`: entrypoint. Parse flags (`--node-name` from
       downward API env var, `--poll-interval`, `--kubeconfig`). Create
       client-go rest.Config (in-cluster). Instantiate Daemon, run loop.
-- [ ] Unit tests: mock bootc client interface, test state machine
-      transitions
+- [x] Unit tests: mock bootc client and KubeClient interfaces, test
+      state machine transitions (25 tests, 63.2% coverage)
 
 ### 5. BootcNodePool reconciler
 
