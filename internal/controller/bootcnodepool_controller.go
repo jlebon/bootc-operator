@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	bootcdevv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
+	"github.com/jlebon/bootc-operator/pkg/drain"
 )
 
 const (
@@ -73,6 +74,7 @@ type BootcNodePoolReconciler struct {
 	client.Client
 	Scheme            *runtime.Scheme
 	DigestResolver    DigestResolver
+	Drainer           drain.Drainer
 	OperatorNamespace string
 }
 
@@ -81,7 +83,9 @@ type BootcNodePoolReconciler struct {
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodepools/finalizers,verbs=update
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodes/status,verbs=get;update;patch
-// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
+// +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;delete
+// +kubebuilder:rbac:groups="",resources=pods/eviction,verbs=create
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
@@ -198,8 +202,9 @@ func (r *BootcNodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	return result, nil
 }
 
-// reconcileDelete handles BootcNodePool deletion. It releases all
-// claimed BootcNodes and removes the finalizer.
+// reconcileDelete handles BootcNodePool deletion. It uncordons any
+// drained nodes, releases all claimed BootcNodes, and removes the
+// finalizer.
 func (r *BootcNodePoolReconciler) reconcileDelete(ctx context.Context, pool *bootcdevv1alpha1.BootcNodePool) (ctrl.Result, error) {
 	log := logf.FromContext(ctx)
 	log.Info("Handling BootcNodePool deletion")
@@ -211,6 +216,20 @@ func (r *BootcNodePoolReconciler) reconcileDelete(ctx context.Context, pool *boo
 	}
 
 	for i := range claimed {
+		// Uncordon any nodes that were cordoned during rollout.
+		if r.Drainer != nil {
+			node := &corev1.Node{}
+			if err := r.Get(ctx, types.NamespacedName{Name: claimed[i].Name}, node); err == nil {
+				if node.Spec.Unschedulable {
+					log.Info("Uncordoning node during pool deletion", "node", claimed[i].Name)
+					if err := r.Drainer.Uncordon(ctx, claimed[i].Name); err != nil {
+						log.Error(err, "Failed to uncordon node during deletion", "node", claimed[i].Name)
+						// Continue with cleanup even if uncordon fails.
+					}
+				}
+			}
+		}
+
 		if err := r.releaseBootcNode(ctx, &claimed[i]); err != nil {
 			return ctrl.Result{}, fmt.Errorf("releasing BootcNode %s: %w", claimed[i].Name, err)
 		}
@@ -496,9 +515,9 @@ func (r *BootcNodePoolReconciler) computeStatus(
 }
 
 // orchestrateRollout advances the rollout by selecting staged nodes for
-// reboot, respecting maxUnavailable. For now, this does not perform
-// drain/cordon -- that is deferred to the drain manager (item 7 in the
-// plan). It simply advances desiredPhase from Staged to Rebooting.
+// reboot, respecting maxUnavailable. It cordons and drains nodes before
+// advancing them to Rebooting, and uncordons nodes that have completed
+// rebooting successfully.
 func (r *BootcNodePoolReconciler) orchestrateRollout(
 	ctx context.Context,
 	pool *bootcdevv1alpha1.BootcNodePool,
@@ -515,6 +534,11 @@ func (r *BootcNodePoolReconciler) orchestrateRollout(
 	// Don't advance if the pool is degraded.
 	if pool.Status.Phase == bootcdevv1alpha1.BootcNodePoolPhaseDegraded {
 		return ctrl.Result{}, nil
+	}
+
+	// Uncordon nodes that completed rebooting successfully.
+	if err := r.uncordonReadyNodes(ctx, claimedNodes, resolvedDigest); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Count currently updating nodes.
@@ -535,6 +559,18 @@ func (r *BootcNodePoolReconciler) orchestrateRollout(
 		case bootcdevv1alpha1.BootcNodePhaseReady:
 			// Node completed reboot -- if it was previously set to
 			// Rebooting, it has successfully updated.
+		}
+	}
+
+	// Also count nodes that are cordoned as updating (they are in the
+	// process of being drained or rebooted).
+	for i := range claimedNodes {
+		bn := &claimedNodes[i]
+		if bn.Spec.DesiredPhase == bootcdevv1alpha1.BootcNodeDesiredPhaseRebooting &&
+			bn.Status.Phase == bootcdevv1alpha1.BootcNodePhaseStaged {
+			// Already advancing (cordoned/draining) but daemon
+			// hasn't started rebooting yet.
+			currentlyUpdating++
 		}
 	}
 
@@ -565,9 +601,24 @@ func (r *BootcNodePoolReconciler) orchestrateRollout(
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
-	// Advance staged nodes to Rebooting.
+	// Cordon, drain, and advance staged nodes to Rebooting.
 	for i := int32(0); i < available && i < int32(len(stagedNodes)); i++ {
 		bn := stagedNodes[i]
+
+		// Cordon the node to prevent new pods from scheduling.
+		if r.Drainer != nil {
+			log.Info("Cordoning node before reboot", "node", bn.Name)
+			if err := r.Drainer.Cordon(ctx, bn.Name); err != nil {
+				return ctrl.Result{}, fmt.Errorf("cordoning node %s: %w", bn.Name, err)
+			}
+
+			// Drain the node to evict pods.
+			log.Info("Draining node before reboot", "node", bn.Name)
+			if err := r.Drainer.Drain(ctx, bn.Name); err != nil {
+				return ctrl.Result{}, fmt.Errorf("draining node %s: %w", bn.Name, err)
+			}
+		}
+
 		log.Info("Advancing BootcNode to Rebooting", "node", bn.Name)
 		bn.Spec.DesiredPhase = bootcdevv1alpha1.BootcNodeDesiredPhaseRebooting
 		if err := r.Update(ctx, bn); err != nil {
@@ -577,6 +628,57 @@ func (r *BootcNodePoolReconciler) orchestrateRollout(
 
 	// Requeue soon to check on reboot progress.
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
+}
+
+// uncordonReadyNodes uncordons nodes that have completed rebooting and
+// are now running the desired image.
+func (r *BootcNodePoolReconciler) uncordonReadyNodes(
+	ctx context.Context,
+	claimedNodes []bootcdevv1alpha1.BootcNode,
+	resolvedDigest string,
+) error {
+	if r.Drainer == nil {
+		return nil
+	}
+
+	log := logf.FromContext(ctx)
+
+	for i := range claimedNodes {
+		bn := &claimedNodes[i]
+		// A node that was rebooting and is now Ready with the desired
+		// image needs to be uncordoned.
+		if bn.Status.Phase != bootcdevv1alpha1.BootcNodePhaseReady {
+			continue
+		}
+		if bn.Status.BootedDigest != resolvedDigest {
+			continue
+		}
+		if bn.Spec.DesiredPhase != bootcdevv1alpha1.BootcNodeDesiredPhaseRebooting {
+			continue
+		}
+
+		// Check if the node is actually cordoned.
+		node := &corev1.Node{}
+		if err := r.Get(ctx, types.NamespacedName{Name: bn.Name}, node); err != nil {
+			return fmt.Errorf("getting node %s for uncordon: %w", bn.Name, err)
+		}
+
+		if node.Spec.Unschedulable {
+			log.Info("Uncordoning node after successful reboot", "node", bn.Name)
+			if err := r.Drainer.Uncordon(ctx, bn.Name); err != nil {
+				return fmt.Errorf("uncordoning node %s: %w", bn.Name, err)
+			}
+		}
+
+		// Reset desiredPhase to Staged since the node has completed
+		// the reboot cycle successfully.
+		bn.Spec.DesiredPhase = bootcdevv1alpha1.BootcNodeDesiredPhaseStaged
+		if err := r.Update(ctx, bn); err != nil {
+			return fmt.Errorf("resetting desiredPhase on BootcNode %s: %w", bn.Name, err)
+		}
+	}
+
+	return nil
 }
 
 // updateStatus re-fetches the pool and persists the status subresource.

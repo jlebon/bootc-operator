@@ -44,6 +44,41 @@ func (f *fakeDigestResolver) Resolve(_ context.Context, _ string, _ *corev1.Secr
 	return f.digest, f.err
 }
 
+// fakeDrainer is a mock Drainer for tests. It records which operations
+// were performed on which nodes.
+type fakeDrainer struct {
+	cordonedNodes   []string
+	drainedNodes    []string
+	uncordonedNodes []string
+	cordonErr       error
+	drainErr        error
+	uncordonErr     error
+}
+
+func (f *fakeDrainer) Cordon(_ context.Context, nodeName string) error {
+	if f.cordonErr != nil {
+		return f.cordonErr
+	}
+	f.cordonedNodes = append(f.cordonedNodes, nodeName)
+	return nil
+}
+
+func (f *fakeDrainer) Drain(_ context.Context, nodeName string) error {
+	if f.drainErr != nil {
+		return f.drainErr
+	}
+	f.drainedNodes = append(f.drainedNodes, nodeName)
+	return nil
+}
+
+func (f *fakeDrainer) Uncordon(_ context.Context, nodeName string) error {
+	if f.uncordonErr != nil {
+		return f.uncordonErr
+	}
+	f.uncordonedNodes = append(f.uncordonedNodes, nodeName)
+	return nil
+}
+
 // createNode creates a Node object for testing.
 func createNode(ctx context.Context, name string, labels map[string]string) *corev1.Node {
 	node := &corev1.Node{
@@ -436,9 +471,13 @@ var _ = Describe("BootcNodePool Controller", func() {
 	})
 
 	Context("When rollout orchestration advances nodes to Rebooting", func() {
-		It("should advance staged nodes to Rebooting phase", func() {
+		It("should cordon, drain, and advance staged nodes to Rebooting phase", func() {
 			node := createNode(ctx, "worker-7", map[string]string{workerLabel: ""})
 			bn := createBootcNode(ctx, "worker-7", node.UID)
+
+			// Set up reconciler with fake drainer.
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
 
 			createPool(ctx, poolName, map[string]string{workerLabel: ""})
 
@@ -458,11 +497,15 @@ var _ = Describe("BootcNodePool Controller", func() {
 			}
 			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
 
-			// Reconcile: should advance to Rebooting.
+			// Reconcile: should cordon, drain, and advance to Rebooting.
 			_, err := reconciler.Reconcile(ctx, reconcile.Request{
 				NamespacedName: types.NamespacedName{Name: poolName},
 			})
 			Expect(err).NotTo(HaveOccurred())
+
+			// Verify cordon and drain were called.
+			Expect(drainer.cordonedNodes).To(ContainElement("worker-7"))
+			Expect(drainer.drainedNodes).To(ContainElement("worker-7"))
 
 			// Verify BootcNode was advanced.
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-7"}, bn)).To(Succeed())
@@ -472,6 +515,120 @@ var _ = Describe("BootcNodePool Controller", func() {
 			pool := &bootcdevv1alpha1.BootcNodePool{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: poolName}, pool)).To(Succeed())
 			Expect(pool.Status.Phase).To(Equal(bootcdevv1alpha1.BootcNodePoolPhaseRolling))
+		})
+	})
+
+	Context("When a node completes rebooting", func() {
+		It("should uncordon the node and reset desiredPhase", func() {
+			node := createNode(ctx, "worker-8", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "worker-8", node.UID)
+
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			// Reconcile to claim.
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate the full rollout lifecycle:
+			// 1. Daemon stages the image.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-8"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseStaged
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// 2. Reconcile advances to Rebooting (cordons + drains).
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// 3. Simulate the node rebooted and is now running the
+			//    desired image. Mark the node as cordoned (as the
+			//    reconciler would have cordoned it).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-8"}, node)).To(Succeed())
+			node.Spec.Unschedulable = true
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-8"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseReady
+			bn.Status.BootedDigest = testDigest
+			bn.Status.Booted = bootcdevv1alpha1.BootEntryStatus{
+				Image: fmt.Sprintf("quay.io/example/test-image@%s", testDigest),
+			}
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// 4. Reconcile should uncordon and reset desiredPhase.
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify uncordon was called.
+			Expect(drainer.uncordonedNodes).To(ContainElement("worker-8"))
+
+			// Verify desiredPhase was reset.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-8"}, bn)).To(Succeed())
+			Expect(bn.Spec.DesiredPhase).To(Equal(bootcdevv1alpha1.BootcNodeDesiredPhaseStaged))
+
+			// Verify pool is Ready.
+			pool := &bootcdevv1alpha1.BootcNodePool{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: poolName}, pool)).To(Succeed())
+			Expect(pool.Status.Phase).To(Equal(bootcdevv1alpha1.BootcNodePoolPhaseReady))
+		})
+	})
+
+	Context("When BootcNodePool is deleted with cordoned nodes", func() {
+		It("should uncordon nodes and release them", func() {
+			node := createNode(ctx, "worker-9", map[string]string{workerLabel: ""})
+			createBootcNode(ctx, "worker-9", node.UID)
+
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			// Reconcile to claim.
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Mark the node as cordoned (as if drain was in progress).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-9"}, node)).To(Succeed())
+			node.Spec.Unschedulable = true
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			// Delete the pool.
+			pool := &bootcdevv1alpha1.BootcNodePool{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: poolName}, pool)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, pool)).To(Succeed())
+
+			// Reconcile deletion.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify uncordon was called.
+			Expect(drainer.uncordonedNodes).To(ContainElement("worker-9"))
+
+			// Verify BootcNode released.
+			bn := &bootcdevv1alpha1.BootcNode{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-9"}, bn)).To(Succeed())
+			Expect(bn.Labels[poolLabelKey]).To(BeEmpty())
+			Expect(bn.Spec.DesiredImage).To(BeEmpty())
+
+			// Verify pool is gone.
+			err = k8sClient.Get(ctx, types.NamespacedName{Name: poolName}, pool)
+			Expect(errors.IsNotFound(err)).To(BeTrue())
 		})
 	})
 

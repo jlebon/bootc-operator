@@ -1139,15 +1139,15 @@ Uses a `CommandRunner` interface for testability.
 - [x] `SetupWithManager`: `For(BootcNodePool)`,
       `Watches(BootcNode, findPoolsForBootcNode)`,
       `Watches(Node, findPoolsForNode)`
-- [x] RBAC markers (bootcnodepools, bootcnodes, nodes, secrets, events)
-      Note: pods/pods/eviction RBAC deferred to drain manager (item 7)
+- [x] RBAC markers (bootcnodepools, bootcnodes, nodes, secrets, events,
+      pods, pods/eviction)
 - [ ] Deploy daemon DaemonSet: reconcile the DaemonSet as an owned resource
       (create/update from `DAEMON_IMAGE` env var)
 - [x] Digest resolution: `internal/controller/digest.go` using
       `go-containerregistry` (`remote.Head`), with optional
       auth from `imagePullSecret`. Includes `DigestResolver` interface
       for testability with `fakeDigestResolver` in tests.
-- [x] Unit tests with envtest (18 tests, 70.0% coverage):
+- [x] Unit tests with envtest (20 tests, 71.1% coverage):
       - Initialize conditions and finalizer
       - Claim matching BootcNodes
       - Release BootcNodes when labels change
@@ -1156,8 +1156,10 @@ Uses a `CommandRunner` interface for testability.
       - Digest resolution failure handling
       - Idle phase with no selector
       - Ready phase when all nodes at desired image
-      - Rollout orchestration: advance staged nodes to Rebooting
+      - Rollout orchestration: cordon, drain, advance staged nodes to Rebooting
       - maxUnavailable limiting concurrent reboots
+      - Uncordon after successful reboot
+      - Uncordon on pool deletion
       - extractDigestFromRef and imageWithDigest helpers
 
 ### 6. Rollout orchestration
@@ -1177,8 +1179,12 @@ in the controller.
       - Wait for all nodes to reach Staged before starting reboots
       - Select batch of Staged nodes (up to maxUnavailable minus
         currently updating)
+      - Cordon and drain node before advancing
       - Set desiredPhase=Rebooting on selected nodes
-      - Note: cordon/drain deferred to drain manager (item 7)
+- [x] `uncordonReadyNodes(claimedNodes, resolvedDigest)`:
+      - Uncordon nodes that completed rebooting and are running the
+        desired image
+      - Reset desiredPhase to Staged after successful reboot
 - [ ] Health check: track time since desiredPhase was set to Rebooting.
       If node doesn't become Ready within healthCheck.timeout → trigger
       rollback (set desiredPhase=RollingBack)
@@ -1188,12 +1194,33 @@ in the controller.
 
 `pkg/drain/` -- wraps `k8s.io/kubectl/pkg/drain`.
 
-- [ ] `pkg/drain/drain.go`:
-      - `Cordon(ctx, client, nodeName) error`
-      - `Drain(ctx, client, nodeName) error` -- evicts pods, respects PDBs,
-        `IgnoreAllDaemonSets: true`, configurable timeout/grace period
-      - `Uncordon(ctx, client, nodeName) error`
-- [ ] Unit tests with fake client
+- [x] `pkg/drain/drain.go`:
+      - `Drainer` interface: `Cordon`, `Drain`, `Uncordon`
+      - `New(client, opts)` constructor wrapping kubectl drain `Helper`
+      - `Options.Timeout` (default 5m)
+      - `IgnoreAllDaemonSets: true`, `Force: true`,
+        `DeleteEmptyDirData: true`, pod's own grace period
+      - Uses `kubernetes.Interface` (clientset) for kubectl drain
+        compatibility
+- [x] Integration with BootcNodePool reconciler:
+      - `Drainer` field on `BootcNodePoolReconciler`
+      - `orchestrateRollout`: cordon + drain before advancing to
+        Rebooting
+      - `uncordonReadyNodes`: uncordon after successful reboot, reset
+        desiredPhase
+      - `reconcileDelete`: uncordon any drained nodes during pool
+        deletion
+      - Wired up in `cmd/operator/main.go` with real clientset
+- [x] RBAC updated: nodes update/patch, pods get/list/delete,
+      pods/eviction create
+- [x] Unit tests with fake client (8 tests, 88.5% coverage):
+      - Cordon/uncordon (including idempotent + nonexistent node)
+      - Drain empty node, with pods, with DaemonSet pods, with PDB
+      - Default timeout verification
+- [x] Controller tests with fake drainer:
+      - Cordon + drain called before advancing to Rebooting
+      - Uncordon called after successful reboot
+      - Uncordon called on pool deletion with cordoned nodes
 
 ### 8. Soft reboot
 
