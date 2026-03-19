@@ -148,13 +148,16 @@ Responsibilities:
   reboot)
 - Execute reboots when instructed (via `systemctl reboot` or soft reboot)
 
-The daemon pod runs with `hostPID: true` and `privileged: true`. All
-bootc and systemctl commands are executed via `nsenter -t 1 -m --`
-(enter PID 1's mount namespace), so bootc sees the host filesystem
-(ostree repo, container storage, boot loader config). This is the
-same pattern kured uses for reboots and the MCO MCD uses for bootc.
+The daemon pod runs with `privileged: true` and the host root filesystem
+mounted at `/run/rootfs` (hostPath volume with HostToContainer
+propagation). All bootc commands are executed via `chroot /run/rootfs`
+(using Go's `SysProcAttr.Chroot`) with the `container` environment
+variable cleared. This is necessary because container runtimes set
+`container=oci`, which bootc checks to detect container context and
+returns reduced status. This is the same pattern the MCO MCD uses.
 For authenticated image pulls, the daemon writes the pull secret to
-`/run/ostree/auth.json` on the host (via nsenter) before running bootc.
+`/run/ostree/auth.json` on the host (via the rootfs mount) before
+running bootc.
 
 RBAC grants `get`/`create`/`update` on all BootcNode resources (needs
 `create` to bootstrap its own BootcNode). The daemon enforces
@@ -833,7 +836,7 @@ bootc-operator/
 │   │   └── rollout.go                    # Rollout orchestration logic
 │   └── daemon/                   # Daemon logic (manual, not kubebuilder)
 │       ├── daemon.go             # Poll loop + state machine
-│       ├── bootc.go              # bootc CLI wrapper (host nsenter)
+│       ├── bootc.go              # bootc CLI wrapper (host chroot)
 │       └── reboot.go             # Reboot execution
 ├── pkg/                          # Importable packages (for MCO)
 │   ├── bootc/                    # bootc CLI interface
@@ -899,15 +902,14 @@ FROM golang:1.25 AS builder
 FROM gcr.io/distroless/static:nonroot AS operator
 COPY --from=builder /workspace/bin/operator /manager
 
-FROM gcr.io/distroless/static:nonroot AS daemon
+FROM gcr.io/distroless/static AS daemon
 COPY --from=builder /workspace/bin/daemon /daemon
-COPY --from=builder /usr/bin/nsenter /usr/bin/nsenter
 ```
 
-Note: Both images use distroless. The daemon only needs `nsenter` in the
-container -- all host commands (bootc, systemctl) are executed via
-`nsenter -t 1 -m --` which uses the host's binaries. The daemon runs
-with elevated privileges (`hostPID: true`, `privileged: true`).
+Note: Both images use distroless. The daemon runs with elevated
+privileges (`privileged: true`) and the host rootfs mounted at
+`/run/rootfs`. All host commands (bootc) are executed via
+`chroot /run/rootfs` with the `container` env var cleared.
 
 ## Edge Cases
 
@@ -963,11 +965,10 @@ Set up the kubebuilder project structure and extend it for the dual-binary
       placeholder poll loop)
 - [x] Add `Makefile` targets: `build-daemon`, `docker-build-daemon`
 - [x] Create multi-target `Dockerfile` (operator + daemon stages, both
-      distroless; daemon includes nsenter)
+      distroless)
 - [x] Create `config/daemon/` directory with:
-      - `daemonset.yaml` (`hostPID: true`, `privileged: true`,
-        `nodeAffinity` with `DoesNotExist` on `node.bootc.dev/skip`,
-        nsenter binary included)
+      - `daemonset.yaml` (`privileged: true`, host rootfs at `/run/rootfs`,
+        `nodeAffinity` with `DoesNotExist` on `node.bootc.dev/skip`)
       - `service_account.yaml`
       - `kustomization.yaml`
 - [x] Create daemon RBAC in `config/rbac/`:
@@ -1005,13 +1006,13 @@ conventions.
 ### 3. bootc client library
 
 `pkg/bootc/` -- Go wrapper for the bootc CLI. Used by the daemon to
-execute bootc commands on the host via nsenter.
+execute bootc commands on the host via chroot into the host rootfs.
 
 - [x] `pkg/bootc/types.go`: Go types matching the `org.containers.bootc/v1`
       BootcHost JSON schema (booted/staged/rollback deployments, image refs,
       versions, timestamps, softRebootCapable)
 - [x] `pkg/bootc/client.go`: `Client` interface + implementation with methods:
-      - `NewClient()` constructor (uses nsenterRunner)
+      - `NewClient()` constructor (uses chrootRunner with `/run/rootfs`)
       - `NewClientWithRunner(runner)` for testing
       - `Status(ctx) (*Host, error)` -- runs `bootc status --json`, parses
       - `Switch(ctx, image) error` -- runs `bootc switch <image>`
@@ -1020,10 +1021,13 @@ execute bootc commands on the host via nsenter.
         --from-downloaded [--soft-reboot=auto] --apply`
       - `Rollback(ctx, apply) error` -- runs `bootc rollback [--apply]`
       - `IsBootcHost(ctx) bool` -- returns true if bootc is available
-      - `CommandRunner` interface for testability (nsenterRunner default)
+      - `CommandRunner` interface for testability (chrootRunner default)
+      - `chrootRunner` uses `SysProcAttr.Chroot` to exec commands inside
+        the host rootfs; clears `container` env var to prevent bootc from
+        detecting container context
 - [x] `pkg/bootc/auth.go`: `WriteAuthFile(ctx, runner, data)` -- writes
-      dockerconfigjson to `/run/ostree/auth.json` on the host via nsenter;
-      `RemoveAuthFile(ctx, runner)` for cleanup
+      dockerconfigjson to `/run/ostree/auth.json` on the host (via the
+      rootfs mount); `RemoveAuthFile(ctx, runner)` for cleanup
 - [x] `pkg/bootc/status.go`: JSON parsing logic, mapping BootcHost fields
       to our `BootEntryStatus` API type. Helper functions:
       `ToBootEntryStatus`, `ToBootcNodeStatus`, `HasStagedImage`,
@@ -1075,7 +1079,7 @@ execute bootc commands on the host via nsenter.
 - [x] `internal/daemon/reboot.go`: NOT NEEDED as separate file. Reboots
       are handled by `bootc upgrade --from-downloaded --apply` and
       `bootc rollback --apply` which both trigger reboots directly.
-      No separate `nsenter systemctl reboot` is needed.
+      No separate `systemctl reboot` call is needed.
 - [x] `cmd/daemon/main.go`: entrypoint. Parse flags (`--node-name` from
       downward API env var, `--poll-interval`, `--kubeconfig`). Create
       client-go rest.Config (in-cluster). Instantiate Daemon, run loop.
@@ -1332,14 +1336,20 @@ execute bootc commands on the host via nsenter.
         - `config/default/kustomization.yaml` no longer includes
           static `../daemon` (operator manages DaemonSet at runtime)
       - Discoveries during E2E:
-        - Daemon image needs nsenter (fedora-minimal base, not
-          distroless)
-        - `bootc status --json` via `nsenter -t 1 -m` returns null
-          booted entry; all namespace flags (`-m -u -i -n -p`) are
-          needed for correct output (still returns null; appears to
-          be a bootc limitation in containerized environments)
-        - E2E test works around this by reading the booted image
-          directly from the host (`bootc status --json`)
+        - `bootc status --json` returns null booted entry when the
+          `container` env var is set (container runtimes set
+          `container=oci`). Root cause found in bootc source:
+          `running_in_container()` checks the `container` env var,
+          `/run/.containerenv`, and `/.dockerenv`. Fix: clear the env
+          var before running bootc via chroot into host rootfs.
+        - `nsenter -t 1 -m` alone is insufficient because bootc also
+          checks the env var (not just filesystem paths).
+        - `systemd-run --pipe` fails across container boundaries due
+          to SCM_RIGHTS fd passing; `--scope` works but inherits the
+          caller's cgroup. The chroot approach avoids both issues.
+        - Daemon image can use distroless (16 MiB) instead of
+          fedora-minimal (68 MiB) since chroot uses the host's
+          binaries via `SysProcAttr.Chroot`.
 
 ## Verification
 
@@ -1354,6 +1364,3 @@ execute bootc commands on the host via nsenter.
   Real bootc is available on the host -- no fake binary needed. Supports
   reboots via the autopkgtest protocol (`/tmp/autopkgtest-reboot <mark>`).
   New tests go in `tests/test-<name>.sh`. Run: `./tests/run.sh rollout`.
-  Note: `bootc status --json` via nsenter in containers returns a
-  reduced status (null booted entry). This is a known bootc limitation
-  that needs investigation for production use.
