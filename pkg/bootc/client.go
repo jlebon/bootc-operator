@@ -74,8 +74,15 @@ type CommandRunner interface {
 // /proc/self/cgroup) and reports a reduced status.
 //
 // For commands that need stdout (like `bootc status --json`),
-// systemd-run writes to a temporary file on the host filesystem
-// because `--pipe` mode may be blocked by SELinux policy.
+// systemd-run writes to a temporary file on the host filesystem.
+// We cannot use `systemd-run --pipe` because --pipe passes file
+// descriptors from the caller to systemd over D-Bus via SCM_RIGHTS.
+// When the caller is inside a container (even with nsenter -m), the
+// fds reference the container's file descriptor context and systemd
+// rejects them with "Connection reset by peer". The --scope flag
+// avoids this but runs in the caller's cgroup (so bootc still sees
+// the container). The file-output approach (-p StandardOutput=file:)
+// lets systemd create and manage the fds entirely on the host side.
 func NewClient() Client {
 	return &client{runner: &nsenterRunner{}}
 }
@@ -106,9 +113,9 @@ func hostExecArgs(cmd string, args ...string) []string {
 }
 
 // hostStatusArgs builds the argument list for running `bootc status
-// --json` on the host and capturing stdout to a file. systemd-run's
-// --pipe mode may be blocked by SELinux, so we redirect output to a
-// temporary file and read it back via a wrapper shell command.
+// --json` on the host and capturing stdout to a file. We use
+// StandardOutput=file: instead of --pipe because --pipe fails when
+// called across container boundaries (see NewClient docs).
 func hostStatusArgs() []string {
 	return []string{
 		"-t", "1", "-m", "--",
