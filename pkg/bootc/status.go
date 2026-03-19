@@ -39,6 +39,7 @@ func ToBootEntryStatus(entry *BootEntry) v1alpha1.BootEntryStatus {
 
 	if entry.Image != nil {
 		s.Image = formatImageRef(entry.Image)
+		s.ImageDigest = entry.Image.ImageDigest
 		s.Version = entry.Image.Version
 		if entry.Image.Timestamp != nil {
 			s.Timestamp = metav1.NewTime(*entry.Image.Timestamp)
@@ -48,16 +49,20 @@ func ToBootEntryStatus(entry *BootEntry) v1alpha1.BootEntryStatus {
 }
 
 // ToBootcNodeStatus maps a full bootc Host to our API's BootcNodeStatus,
-// populating the booted, staged, and rollback entries.
+// populating the tracked image, booted, staged, and rollback entries.
 func ToBootcNodeStatus(host *Host) v1alpha1.BootcNodeStatus {
 	if host == nil {
 		return v1alpha1.BootcNodeStatus{}
 	}
-	return v1alpha1.BootcNodeStatus{
+	status := v1alpha1.BootcNodeStatus{
 		Booted:   ToBootEntryStatus(host.Status.Booted),
 		Staged:   ToBootEntryStatus(host.Status.Staged),
 		Rollback: ToBootEntryStatus(host.Status.Rollback),
 	}
+	if host.Spec.Image != nil {
+		status.TrackedImage = host.Spec.Image.Image
+	}
+	return status
 }
 
 // formatImageRef builds a fully qualified image reference from an

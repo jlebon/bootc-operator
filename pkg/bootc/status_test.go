@@ -64,6 +64,9 @@ func TestToBootEntryStatusFull(t *testing.T) {
 	if !s.SoftRebootCapable {
 		t.Error("SoftRebootCapable should be true")
 	}
+	if s.ImageDigest != "sha256:abcdef1234567890" {
+		t.Errorf("ImageDigest = %q, want %q", s.ImageDigest, "sha256:abcdef1234567890")
+	}
 }
 
 func TestToBootEntryStatusNoDigest(t *testing.T) {
@@ -98,6 +101,12 @@ func TestToBootEntryStatusNoImage(t *testing.T) {
 
 func TestToBootcNodeStatus(t *testing.T) {
 	host := &Host{
+		Spec: HostSpec{
+			Image: &ImageReference{
+				Image:     "quay.io/test/tracked:stable",
+				Transport: "registry",
+			},
+		},
 		Status: HostStatus{
 			Booted: &BootEntry{
 				Image: &ImageStatus{
@@ -123,8 +132,14 @@ func TestToBootcNodeStatus(t *testing.T) {
 
 	status := ToBootcNodeStatus(host)
 
+	if status.TrackedImage != "quay.io/test/tracked:stable" {
+		t.Errorf("TrackedImage = %q, want %q", status.TrackedImage, "quay.io/test/tracked:stable")
+	}
 	if status.Booted.Image != "quay.io/test/booted@sha256:1111" {
 		t.Errorf("Booted.Image = %q", status.Booted.Image)
+	}
+	if status.Booted.ImageDigest != "sha256:1111" {
+		t.Errorf("Booted.ImageDigest = %q", status.Booted.ImageDigest)
 	}
 	if status.Staged.Image != "quay.io/test/staged@sha256:2222" {
 		t.Errorf("Staged.Image = %q", status.Staged.Image)

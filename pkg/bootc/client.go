@@ -60,18 +60,22 @@ type CommandRunner interface {
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)
 }
 
-// nsenterPrefix is the set of nsenter flags used to enter PID 1's
-// namespaces. All bootc commands run via nsenter so they see the host
-// filesystem, network, IPC, and UTS. This is necessary because
-// bootc reads system state from /sysroot, /ostree, and D-Bus -- all
-// of which require the full host namespace context, not just the mount
-// namespace.
-var nsenterPrefix = []string{"-t", "1", "-m", "-u", "-i", "-n", "-p", "--"}
-
-// NewClient creates a Client that executes bootc commands on the host
-// via nsenter. All commands are prefixed with
-// `nsenter -t 1 -m -u -i -n -p -- <command>` to enter PID 1's
-// namespaces.
+// NewClient creates a Client that executes bootc commands on the host.
+//
+// All commands run via:
+//
+//	nsenter -t 1 -m -- systemd-run --wait --quiet --collect bootc ...
+//
+// This two-step approach is necessary because bootc reads its state
+// from /sysroot and the ostree repo, which requires both the host
+// mount namespace (nsenter -m) and the host cgroup/process context
+// (systemd-run spawns the command as a native host process). Without
+// systemd-run, bootc detects it is running inside a container (via
+// /proc/self/cgroup) and reports a reduced status.
+//
+// For commands that need stdout (like `bootc status --json`),
+// systemd-run writes to a temporary file on the host filesystem
+// because `--pipe` mode may be blocked by SELinux policy.
 func NewClient() Client {
 	return &client{runner: &nsenterRunner{}}
 }
@@ -86,23 +90,44 @@ type client struct {
 	runner CommandRunner
 }
 
-// nsenterArgs builds the full nsenter argument list by prepending the
-// nsenter prefix to the given command and its arguments.
-func nsenterArgs(cmd string, args ...string) []string {
-	result := make([]string, 0, len(nsenterPrefix)+1+len(args))
-	result = append(result, nsenterPrefix...)
+// hostExecArgs builds the argument list for running a command on the
+// host via nsenter + systemd-run.
+func hostExecArgs(cmd string, args ...string) []string {
+	// nsenter -t 1 -m -- systemd-run --wait --quiet --collect <cmd> <args...>
+	prefix := [...]string{
+		"-t", "1", "-m", "--",
+		"systemd-run", "--wait", "--quiet", "--collect",
+	}
+	result := make([]string, 0, len(prefix)+1+len(args))
+	result = append(result, prefix[:]...)
 	result = append(result, cmd)
 	result = append(result, args...)
 	return result
 }
 
+// hostStatusArgs builds the argument list for running `bootc status
+// --json` on the host and capturing stdout to a file. systemd-run's
+// --pipe mode may be blocked by SELinux, so we redirect output to a
+// temporary file and read it back via a wrapper shell command.
+func hostStatusArgs() []string {
+	return []string{
+		"-t", "1", "-m", "--",
+		"bash", "-c",
+		"systemd-run --wait --quiet --collect " +
+			"-p StandardOutput=file:/run/bootc-status.json " +
+			"bootc status --json && " +
+			"cat /run/bootc-status.json; " +
+			"rm -f /run/bootc-status.json",
+	}
+}
+
 func (c *client) IsBootcHost(ctx context.Context) bool {
-	_, err := c.runner.Run(ctx, "nsenter", nsenterArgs("bootc", "status", "--json")...)
+	_, err := c.runner.Run(ctx, "nsenter", hostExecArgs("bootc", "status", "--json")...)
 	return err == nil
 }
 
 func (c *client) Status(ctx context.Context) (*Host, error) {
-	out, err := c.runner.Run(ctx, "nsenter", nsenterArgs("bootc", "status", "--json")...)
+	out, err := c.runner.Run(ctx, "nsenter", hostStatusArgs()...)
 	if err != nil {
 		return nil, fmt.Errorf("running bootc status: %w", err)
 	}
@@ -115,7 +140,7 @@ func (c *client) Status(ctx context.Context) (*Host, error) {
 }
 
 func (c *client) Switch(ctx context.Context, image string) error {
-	_, err := c.runner.Run(ctx, "nsenter", nsenterArgs("bootc", "switch", image)...)
+	_, err := c.runner.Run(ctx, "nsenter", hostExecArgs("bootc", "switch", image)...)
 	if err != nil {
 		return fmt.Errorf("running bootc switch: %w", err)
 	}
@@ -123,7 +148,7 @@ func (c *client) Switch(ctx context.Context, image string) error {
 }
 
 func (c *client) UpgradeDownloadOnly(ctx context.Context) error {
-	_, err := c.runner.Run(ctx, "nsenter", nsenterArgs("bootc", "upgrade", "--download-only")...)
+	_, err := c.runner.Run(ctx, "nsenter", hostExecArgs("bootc", "upgrade", "--download-only")...)
 	if err != nil {
 		return fmt.Errorf("running bootc upgrade --download-only: %w", err)
 	}
@@ -135,7 +160,7 @@ func (c *client) UpgradeApply(ctx context.Context, softReboot bool) error {
 	if softReboot {
 		args = append(args, "--soft-reboot=auto")
 	}
-	_, err := c.runner.Run(ctx, "nsenter", nsenterArgs(args[0], args[1:]...)...)
+	_, err := c.runner.Run(ctx, "nsenter", hostExecArgs(args[0], args[1:]...)...)
 	if err != nil {
 		return fmt.Errorf("running bootc upgrade --apply: %w", err)
 	}
@@ -147,7 +172,7 @@ func (c *client) Rollback(ctx context.Context, apply bool) error {
 	if apply {
 		args = append(args, "--apply")
 	}
-	_, err := c.runner.Run(ctx, "nsenter", nsenterArgs(args[0], args[1:]...)...)
+	_, err := c.runner.Run(ctx, "nsenter", hostExecArgs(args[0], args[1:]...)...)
 	if err != nil {
 		return fmt.Errorf("running bootc rollback: %w", err)
 	}

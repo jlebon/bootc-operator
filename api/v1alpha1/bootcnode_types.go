@@ -101,6 +101,12 @@ type BootEntryStatus struct {
 	// +optional
 	Image string `json:"image,omitempty"`
 
+	// imageDigest is the content digest of the container image
+	// (e.g. "sha256:abc123..."). This is the immutable identifier
+	// for the exact image content deployed in this slot.
+	// +optional
+	ImageDigest string `json:"imageDigest,omitempty"`
+
 	// version is the image version label, if available.
 	// +optional
 	Version string `json:"version,omitempty"`
@@ -120,6 +126,14 @@ type BootEntryStatus struct {
 // BootcNodeStatus reflects the observed bootc state on a node, as
 // reported by the daemon from `bootc status --json`.
 type BootcNodeStatus struct {
+	// trackedImage is the container image reference that bootc is
+	// configured to follow for updates (from `bootc status`
+	// spec.image). This is the image set by `bootc switch` or the
+	// original installation image. It may differ from the booted
+	// image when an update is in progress or pending.
+	// +optional
+	TrackedImage string `json:"trackedImage,omitempty"`
+
 	// booted is the bootc deployment that the node is currently running.
 	// +optional
 	Booted BootEntryStatus `json:"booted,omitempty,omitzero"`
@@ -167,7 +181,9 @@ type BootcNodeStatus struct {
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:printcolumn:name="Pool",type=string,JSONPath=".metadata.labels.bootc\\.dev/pool"
 // +kubebuilder:printcolumn:name="Phase",type=string,JSONPath=".status.phase"
-// +kubebuilder:printcolumn:name="Booted",type=string,JSONPath=".status.booted.image",priority=1
+// +kubebuilder:printcolumn:name="Image",type=string,JSONPath=".status.trackedImage"
+// +kubebuilder:printcolumn:name="Booted",type=string,JSONPath=".status.booted.imageDigest"
+// +kubebuilder:printcolumn:name="SoftReboot",type=boolean,JSONPath=".status.booted.softRebootCapable"
 // +kubebuilder:printcolumn:name="Staged",type=string,JSONPath=".status.staged.image",priority=1
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=".metadata.creationTimestamp"
 type BootcNode struct {
