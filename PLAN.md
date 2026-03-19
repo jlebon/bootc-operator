@@ -1285,17 +1285,39 @@ in the controller.
 
 ### 10. Events
 
-- [ ] Set up `events.EventRecorder` in the reconciler.
-- [ ] Emit events on BootcNodePool:
-      - `RolloutStarted` (new digest detected)
-      - `StagingComplete` (all nodes staged)
-      - `RolloutComplete` (all nodes at desired image)
-      - `RolloutDegraded` (node failed)
-- [ ] Emit events on BootcNode:
-      - `ImageStaged` (download complete)
-      - `RebootInitiated` (reboot starting)
-      - `UpdateComplete` (node running new image)
-      - `RollbackTriggered` (health check failed)
+- [x] Set up `events.EventRecorder` in the reconciler. Added `Recorder`
+      field (`events.EventRecorder`) to `BootcNodePoolReconciler`, wired
+      up in `cmd/operator/main.go` via `mgr.GetEventRecorder()` (new
+      events API). Helper methods `recordPoolEvent()` and
+      `recordNodeEvent()` safely handle nil recorder for tests without
+      event recording. Uses the new `k8s.io/client-go/tools/events` API
+      (not the deprecated `k8s.io/client-go/tools/record`).
+- [x] Emit events on BootcNodePool:
+      - `RolloutStarted` (Normal): emitted when resolvedDigest changes
+        from the previous value in status
+      - `StagingComplete` (Normal): emitted when all nodes are staged
+        and the first batch of rolling reboots begins
+      - `RolloutComplete` (Normal): emitted when pool transitions to
+        Ready phase (all nodes running desired image)
+      - `RolloutDegraded` (Warning): emitted when pool transitions to
+        Degraded phase (error nodes detected)
+      - `RebootInitiated` (Normal): emitted on the pool when a node's
+        reboot is initiated (for pool-level visibility)
+      - `RollbackTriggered` (Warning): emitted on the pool when a
+        rollback is triggered on a node
+- [x] Emit events on BootcNode:
+      - `ImageStaged` (Normal): emitted in `computeStatus` when node
+        is in Staged phase (event recorder coalesces duplicates)
+      - `RebootInitiated` (Normal): emitted after advancing a node to
+        Rebooting and completing drain
+      - `UpdateComplete` (Normal): emitted after uncordoning a node
+        that successfully rebooted into the desired image
+      - `RollbackTriggered` (Warning): emitted when health check
+        timeout triggers rollback on a node
+- [x] Unit tests (8 Ginkgo tests): RolloutComplete, RebootInitiated,
+      UpdateComplete, RollbackTriggered, RolloutDegraded, RolloutStarted,
+      StagingComplete, ImageStaged. Uses `events.FakeRecorder` with
+      channel-based event capture. Controller coverage: 76.5%.
 
 ### 11. Testing
 

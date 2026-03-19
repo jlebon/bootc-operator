@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	bootcdevv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
@@ -986,6 +988,407 @@ var _ = Describe("BootcNodePool Controller", func() {
 				}
 			}
 			Expect(rebootingCount).To(Equal(1))
+		})
+	})
+})
+
+// collectEvents reads all available events from the fake recorder's
+// channel and returns them as a slice of strings.
+func collectEvents(recorder *events.FakeRecorder) []string {
+	var collected []string
+	for {
+		select {
+		case e := <-recorder.Events:
+			collected = append(collected, e)
+		default:
+			return collected
+		}
+	}
+}
+
+// hasEvent returns true if any event string contains the given reason.
+func hasEvent(eventList []string, reason string) bool {
+	for _, e := range eventList {
+		if strings.Contains(e, reason) {
+			return true
+		}
+	}
+	return false
+}
+
+var _ = Describe("BootcNodePool Controller Events", func() {
+	const (
+		poolName    = "event-pool"
+		testDigest  = "sha256:abc123def4567890abc123def4567890abc123def4567890abc123def4567890"
+		newDigest   = "sha256:new123def4567890abc123def4567890abc123def4567890abc123def4567890"
+		workerLabel = "node-role.kubernetes.io/worker"
+	)
+
+	var (
+		ctx          context.Context
+		reconciler   *BootcNodePoolReconciler
+		fakeRecorder *events.FakeRecorder
+	)
+
+	BeforeEach(func() {
+		ctx = context.Background()
+		fakeRecorder = events.NewFakeRecorder(20)
+		reconciler = &BootcNodePoolReconciler{
+			Client: k8sClient,
+			Scheme: k8sClient.Scheme(),
+			DigestResolver: &fakeDigestResolver{
+				digest: testDigest,
+			},
+			Recorder: fakeRecorder,
+		}
+	})
+
+	AfterEach(func() {
+		poolList := &bootcdevv1alpha1.BootcNodePoolList{}
+		Expect(k8sClient.List(ctx, poolList)).To(Succeed())
+		for i := range poolList.Items {
+			pool := &poolList.Items[i]
+			pool.Finalizers = nil
+			_ = k8sClient.Update(ctx, pool)
+			_ = k8sClient.Delete(ctx, pool)
+		}
+		bnList := &bootcdevv1alpha1.BootcNodeList{}
+		Expect(k8sClient.List(ctx, bnList)).To(Succeed())
+		for i := range bnList.Items {
+			_ = k8sClient.Delete(ctx, &bnList.Items[i])
+		}
+		nodeList := &corev1.NodeList{}
+		Expect(k8sClient.List(ctx, nodeList)).To(Succeed())
+		for i := range nodeList.Items {
+			_ = k8sClient.Delete(ctx, &nodeList.Items[i])
+		}
+	})
+
+	Context("When a rollout completes", func() {
+		It("should emit RolloutComplete event on the pool", func() {
+			node := createNode(ctx, "evt-worker-1", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "evt-worker-1", node.UID)
+
+			// Node is already running the desired image.
+			bn.Status.BootedDigest = testDigest
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			// Reconcile through init + finalizer + full reconcile.
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Verify the pool is Ready.
+			pool := &bootcdevv1alpha1.BootcNodePool{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: poolName}, pool)).To(Succeed())
+			Expect(pool.Status.Phase).To(Equal(bootcdevv1alpha1.BootcNodePoolPhaseReady))
+
+			// Check for RolloutComplete event.
+			recorded := collectEvents(fakeRecorder)
+			Expect(hasEvent(recorded, "RolloutComplete")).To(BeTrue(),
+				"expected RolloutComplete event, got: %v", recorded)
+		})
+	})
+
+	Context("When a node is advanced to Rebooting", func() {
+		It("should emit RebootInitiated event on the node and pool", func() {
+			node := createNode(ctx, "evt-worker-2", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "evt-worker-2", node.UID)
+
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			// Reconcile to claim.
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate daemon staging the image.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "evt-worker-2"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseStaged
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Clear events from claim phase.
+			collectEvents(fakeRecorder)
+
+			// Reconcile: should cordon, drain, and advance to Rebooting.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Check for RebootInitiated event.
+			recorded := collectEvents(fakeRecorder)
+			Expect(hasEvent(recorded, "RebootInitiated")).To(BeTrue(),
+				"expected RebootInitiated event, got: %v", recorded)
+		})
+	})
+
+	Context("When a node completes reboot successfully", func() {
+		It("should emit UpdateComplete event on the node", func() {
+			node := createNode(ctx, "evt-worker-3", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "evt-worker-3", node.UID)
+
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate daemon staging.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "evt-worker-3"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseStaged
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Advance to Rebooting.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Simulate successful reboot.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "evt-worker-3"}, node)).To(Succeed())
+			node.Spec.Unschedulable = true
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "evt-worker-3"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseReady
+			bn.Status.BootedDigest = testDigest
+			bn.Status.Booted = bootcdevv1alpha1.BootEntryStatus{
+				Image: fmt.Sprintf("quay.io/example/test-image@%s", testDigest),
+			}
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Clear events from prior phases.
+			collectEvents(fakeRecorder)
+
+			// Reconcile: should uncordon and emit UpdateComplete.
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			recorded := collectEvents(fakeRecorder)
+			Expect(hasEvent(recorded, "UpdateComplete")).To(BeTrue(),
+				"expected UpdateComplete event, got: %v", recorded)
+		})
+	})
+
+	Context("When a reboot timeout triggers rollback", func() {
+		It("should emit RollbackTriggered event on the node and pool", func() {
+			node := createNode(ctx, "evt-worker-4", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "evt-worker-4", node.UID)
+
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
+
+			fakeNow := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+			reconciler.Now = func() time.Time { return fakeNow }
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate daemon staging.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "evt-worker-4"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseStaged
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Advance to Rebooting.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Advance past timeout.
+			fakeNow = fakeNow.Add(6 * time.Minute)
+
+			// Simulate daemon rebooting.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "evt-worker-4"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseRebooting
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Clear events from prior phases.
+			collectEvents(fakeRecorder)
+
+			// Reconcile: should detect timeout and emit RollbackTriggered.
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			recorded := collectEvents(fakeRecorder)
+			Expect(hasEvent(recorded, "RollbackTriggered")).To(BeTrue(),
+				"expected RollbackTriggered event, got: %v", recorded)
+		})
+	})
+
+	Context("When the pool becomes Degraded", func() {
+		It("should emit RolloutDegraded event on the pool", func() {
+			node := createNode(ctx, "evt-worker-5", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "evt-worker-5", node.UID)
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Set the node to Error phase.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "evt-worker-5"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseError
+			bn.Status.Message = "test error"
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Clear events from claim phase.
+			collectEvents(fakeRecorder)
+
+			// Reconcile: should detect degraded state.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			recorded := collectEvents(fakeRecorder)
+			Expect(hasEvent(recorded, "RolloutDegraded")).To(BeTrue(),
+				"expected RolloutDegraded event, got: %v", recorded)
+		})
+	})
+
+	Context("When a new digest is detected", func() {
+		It("should emit RolloutStarted event on the pool", func() {
+			node := createNode(ctx, "evt-worker-6", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "evt-worker-6", node.UID)
+
+			// Set node as already running the initial digest.
+			bn.Status.BootedDigest = testDigest
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			// Reconcile to get to Ready state with initial digest.
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Verify pool is Ready with the initial digest.
+			pool := &bootcdevv1alpha1.BootcNodePool{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: poolName}, pool)).To(Succeed())
+			Expect(pool.Status.ResolvedDigest).To(Equal(testDigest))
+
+			// Now change the digest to simulate a new image push.
+			reconciler.DigestResolver = &fakeDigestResolver{digest: newDigest}
+
+			// Clear events from initial reconciles.
+			collectEvents(fakeRecorder)
+
+			// Reconcile: should detect new digest and emit RolloutStarted.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			recorded := collectEvents(fakeRecorder)
+			Expect(hasEvent(recorded, "RolloutStarted")).To(BeTrue(),
+				"expected RolloutStarted event, got: %v", recorded)
+		})
+	})
+
+	Context("When staging completes and rolling reboots begin", func() {
+		It("should emit StagingComplete event on the pool", func() {
+			node := createNode(ctx, "evt-worker-7", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "evt-worker-7", node.UID)
+
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate daemon staging the image.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "evt-worker-7"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseStaged
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Clear events from claim phase.
+			collectEvents(fakeRecorder)
+
+			// Reconcile: should detect all staged and emit StagingComplete.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			recorded := collectEvents(fakeRecorder)
+			Expect(hasEvent(recorded, "StagingComplete")).To(BeTrue(),
+				"expected StagingComplete event, got: %v", recorded)
+		})
+	})
+
+	Context("When a node's image is staged", func() {
+		It("should emit ImageStaged event on the BootcNode", func() {
+			node := createNode(ctx, "evt-worker-8", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "evt-worker-8", node.UID)
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate daemon staging the image.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "evt-worker-8"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseStaged
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Clear events from claim phase.
+			collectEvents(fakeRecorder)
+
+			// Reconcile: should detect staged node and emit ImageStaged.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			recorded := collectEvents(fakeRecorder)
+			Expect(hasEvent(recorded, "ImageStaged")).To(BeTrue(),
+				"expected ImageStaged event, got: %v", recorded)
 		})
 	})
 })

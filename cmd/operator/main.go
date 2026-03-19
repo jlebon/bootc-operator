@@ -207,6 +207,7 @@ func main() {
 		Scheme:            mgr.GetScheme(),
 		DigestResolver:    controller.NewDigestResolver(),
 		Drainer:           drain.New(clientset, drain.Options{}),
+		Recorder:          mgr.GetEventRecorder("bootcnodepool-controller"),
 		OperatorNamespace: operatorNamespace,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "BootcNodePool")

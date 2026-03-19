@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/events"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
@@ -86,6 +87,7 @@ type BootcNodePoolReconciler struct {
 	Scheme            *runtime.Scheme
 	DigestResolver    DigestResolver
 	Drainer           drain.Drainer
+	Recorder          events.EventRecorder
 	OperatorNamespace string
 
 	// Now returns the current time. Defaults to time.Now when nil.
@@ -102,6 +104,24 @@ func (r *BootcNodePoolReconciler) now() time.Time {
 	return time.Now()
 }
 
+// recordPoolEvent emits an event on a BootcNodePool. Safe to call when
+// the recorder is nil (e.g. in tests without an event recorder).
+func (r *BootcNodePoolReconciler) recordPoolEvent(pool *bootcdevv1alpha1.BootcNodePool, eventType, reason, messageFmt string, args ...any) {
+	if r.Recorder == nil {
+		return
+	}
+	r.Recorder.Eventf(pool, nil, eventType, reason, reason, messageFmt, args...)
+}
+
+// recordNodeEvent emits an event on a BootcNode. Safe to call when the
+// recorder is nil.
+func (r *BootcNodePoolReconciler) recordNodeEvent(bn *bootcdevv1alpha1.BootcNode, eventType, reason, messageFmt string, args ...any) {
+	if r.Recorder == nil {
+		return
+	}
+	r.Recorder.Eventf(bn, nil, eventType, reason, reason, messageFmt, args...)
+}
+
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodepools,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodepools/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodepools/finalizers,verbs=update
@@ -112,6 +132,7 @@ func (r *BootcNodePoolReconciler) now() time.Time {
 // +kubebuilder:rbac:groups="",resources=pods/eviction,verbs=create
 // +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 // Reconcile moves the cluster state toward the desired state specified
 // by the BootcNodePool object. It resolves the image to a digest, claims
@@ -167,6 +188,12 @@ func (r *BootcNodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 			log.Error(statusErr, "Failed to update status after digest resolution failure")
 		}
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
+	// Emit RolloutStarted event when a new digest is detected.
+	if pool.Status.ResolvedDigest != "" && pool.Status.ResolvedDigest != resolvedDigest {
+		r.recordPoolEvent(pool, corev1.EventTypeNormal, "RolloutStarted",
+			"New image digest detected: %s", resolvedDigest)
 	}
 
 	// 6. List all BootcNodes and Nodes, match against nodeSelector.
@@ -475,7 +502,8 @@ func (r *BootcNodePoolReconciler) computeStatus(
 	pool.Status.TargetNodes = int32(len(claimedNodes))
 
 	var readyCount, stagedCount, updatingCount, errorCount int32
-	for _, bn := range claimedNodes {
+	for i := range claimedNodes {
+		bn := &claimedNodes[i]
 		switch {
 		case bn.Status.Phase == bootcdevv1alpha1.BootcNodePhaseReady &&
 			bn.Status.BootedDigest == resolvedDigest:
@@ -492,6 +520,8 @@ func (r *BootcNodePoolReconciler) computeStatus(
 			// Ready but on old image -- still needs update.
 			stagedCount++
 		case bn.Status.Phase == bootcdevv1alpha1.BootcNodePhaseStaged:
+			r.recordNodeEvent(bn, corev1.EventTypeNormal, "ImageStaged",
+				"Image %s has been staged and is ready to apply", bn.Spec.DesiredImage)
 			stagedCount++
 		case bn.Status.Phase == bootcdevv1alpha1.BootcNodePhaseStaging:
 			stagedCount++
@@ -509,12 +539,18 @@ func (r *BootcNodePoolReconciler) computeStatus(
 	pool.Status.StagedNodes = stagedCount
 	pool.Status.UpdatingNodes = updatingCount
 
-	// Determine pool phase.
+	// Determine pool phase. Track the previous phase for event emission.
+	prevPhase := pool.Status.Phase
+
 	switch {
 	case errorCount > 0:
 		pool.Status.Phase = bootcdevv1alpha1.BootcNodePoolPhaseDegraded
 		setDegradedCondition(pool, "NodeError",
 			fmt.Sprintf("%d node(s) in error state", errorCount))
+		if prevPhase != bootcdevv1alpha1.BootcNodePoolPhaseDegraded {
+			r.recordPoolEvent(pool, corev1.EventTypeWarning, "RolloutDegraded",
+				"%d node(s) in error state", errorCount)
+		}
 	case len(claimedNodes) == 0:
 		pool.Status.Phase = bootcdevv1alpha1.BootcNodePoolPhaseIdle
 		clearDegradedCondition(pool)
@@ -523,6 +559,10 @@ func (r *BootcNodePoolReconciler) computeStatus(
 		setAvailableCondition(pool, true, "AllNodesReady", "All nodes are running the desired image")
 		setProgressingCondition(pool, false, "RolloutComplete", "All nodes updated")
 		clearDegradedCondition(pool)
+		if prevPhase != bootcdevv1alpha1.BootcNodePoolPhaseReady && prevPhase != "" {
+			r.recordPoolEvent(pool, corev1.EventTypeNormal, "RolloutComplete",
+				"All %d node(s) are running the desired image", len(claimedNodes))
+		}
 	case updatingCount > 0:
 		pool.Status.Phase = bootcdevv1alpha1.BootcNodePoolPhaseRolling
 		setProgressingCondition(pool, true, "Rolling",
@@ -603,8 +643,17 @@ func (r *BootcNodePoolReconciler) orchestrateRollout(
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
+	// Emit StagingComplete when we first start advancing to reboots.
+	// This is detected by checking that no nodes are currently
+	// updating (first batch) and there are staged candidates.
+	if currentlyUpdating == 0 && len(stagedNodes) > 0 {
+		r.recordPoolEvent(pool, corev1.EventTypeNormal, "StagingComplete",
+			"All %d node(s) have staged the desired image, starting rolling reboots",
+			len(claimedNodes))
+	}
+
 	// Cordon, drain, and advance staged nodes to Rebooting.
-	if err := r.advanceNodesToRebooting(ctx, stagedNodes, available); err != nil {
+	if err := r.advanceNodesToRebooting(ctx, pool, stagedNodes, available); err != nil {
 		return ctrl.Result{}, err
 	}
 
@@ -672,6 +721,7 @@ func allNodesStaged(
 // timeout tracking.
 func (r *BootcNodePoolReconciler) advanceNodesToRebooting(
 	ctx context.Context,
+	pool *bootcdevv1alpha1.BootcNodePool,
 	stagedNodes []*bootcdevv1alpha1.BootcNode,
 	available int32,
 ) error {
@@ -704,6 +754,11 @@ func (r *BootcNodePoolReconciler) advanceNodesToRebooting(
 		if err := r.Update(ctx, bn); err != nil {
 			return fmt.Errorf("advancing BootcNode %s to Rebooting: %w", bn.Name, err)
 		}
+
+		r.recordNodeEvent(bn, corev1.EventTypeNormal, "RebootInitiated",
+			"Node drained and reboot initiated for image %s", bn.Spec.DesiredImage)
+		r.recordPoolEvent(pool, corev1.EventTypeNormal, "RebootInitiated",
+			"Reboot initiated on node %s", bn.Name)
 	}
 
 	return nil
@@ -772,6 +827,11 @@ func (r *BootcNodePoolReconciler) checkRebootTimeouts(
 		if err := r.Update(ctx, bn); err != nil {
 			return false, fmt.Errorf("triggering rollback on node %s: %w", bn.Name, err)
 		}
+
+		r.recordNodeEvent(bn, corev1.EventTypeWarning, "RollbackTriggered",
+			"Health check timeout exceeded (%s), triggering rollback", timeout)
+		r.recordPoolEvent(pool, corev1.EventTypeWarning, "RollbackTriggered",
+			"Rollback triggered on node %s after timeout (%s)", bn.Name, timeout)
 		timedOut = true
 	}
 
@@ -898,6 +958,9 @@ func (r *BootcNodePoolReconciler) uncordonReadyNodes(
 		if err := r.Update(ctx, bn); err != nil {
 			return fmt.Errorf("resetting desiredPhase on BootcNode %s: %w", bn.Name, err)
 		}
+
+		r.recordNodeEvent(bn, corev1.EventTypeNormal, "UpdateComplete",
+			"Node is now running the desired image %s", bn.Status.Booted.Image)
 	}
 
 	return nil
