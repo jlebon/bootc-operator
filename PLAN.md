@@ -1137,9 +1137,24 @@ execute bootc commands on the host via nsenter.
       creation, idempotency, image updates, spec correctness (node
       affinity, tolerations, hostPID, privileged, NODE_NAME env),
       and ClusterRole drift repair. Controller coverage: 78.1%.
-- [ ] Digest resolution: `internal/controller/digest.go` using
-      `go-containerregistry` (`remote.Image`, `remote.Head`), with optional
-      auth from `imagePullSecret`
+- [x] Digest resolution: `internal/controller/digest.go` using
+      `go-containerregistry` (`remote.Head`), with optional auth from
+      `imagePullSecret`. `ImageResolver` interface + `RegistryResolver`
+      implementation. Resolves tags to digests via registry HEAD
+      requests. Reads `kubernetes.io/dockerconfigjson` Secrets for
+      authenticated registries via `secretKeychain`. Integrated into
+      the reconciler as an injectable field (nil-safe fallback for
+      tests). RBAC marker added for Secret read access. Wired up in
+      `cmd/operator/main.go` with `NewRegistryResolver`. 23 tests
+      covering: isDigestReference, parseDockerConfigJSON,
+      secretKeychain resolution (exact match, https prefix, unknown
+      registry), RegistryResolver (digest passthrough, tag resolution
+      via in-memory registry, nonexistent image, invalid reference),
+      keychainForSecret (valid secret, nonexistent, wrong type,
+      invalid content, empty name), controller integration (mock
+      resolver, imagePullSecret passthrough, error handling/requeue,
+      nil resolver fallback, digest update detection, real
+      in-memory registry end-to-end). Controller coverage: 80.5%.
 
 ### 6. Rollout orchestration
 

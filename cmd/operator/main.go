@@ -182,6 +182,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Determine the operator's namespace. Used for reading
+	// imagePullSecrets and managing daemon resources.
+	operatorNamespace := os.Getenv("POD_NAMESPACE")
+	if operatorNamespace == "" {
+		// Fall back to reading the namespace from the service
+		// account mounted by the kubelet. This is the standard
+		// way to determine the namespace when running in-cluster.
+		nsBytes, readErr := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
+		if readErr != nil {
+			setupLog.Info("Could not determine operator namespace, defaulting to bootc-operator-system")
+			operatorNamespace = "bootc-operator-system"
+		} else {
+			operatorNamespace = string(nsBytes)
+		}
+	}
+
 	// Create a kubernetes clientset for the drain manager (the drain
 	// package wraps kubectl's drain logic which requires a clientset).
 	clientset, err := kubernetes.NewForConfig(mgr.GetConfig())
@@ -194,10 +210,13 @@ func main() {
 		DeleteEmptyDirData: true,
 	})
 
+	imageResolver := controller.NewRegistryResolver(mgr.GetClient(), operatorNamespace)
+
 	if err := (&controller.BootcNodePoolReconciler{
-		Client:  mgr.GetClient(),
-		Scheme:  mgr.GetScheme(),
-		Drainer: drainer,
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		Drainer:       drainer,
+		ImageResolver: imageResolver,
 		//nolint:staticcheck // TODO: migrate to events.EventRecorder
 		Recorder: mgr.GetEventRecorderFor("bootcnodepool-controller"),
 	}).SetupWithManager(mgr); err != nil {
@@ -207,28 +226,11 @@ func main() {
 
 	// Set up the DaemonSet reconciler to manage the bootc-daemon
 	// DaemonSet. The daemon image is read from the DAEMON_IMAGE env
-	// var (set on the operator Deployment during installation). The
-	// operator namespace is read from the POD_NAMESPACE env var
-	// (standard downward API) or falls back to the namespace in the
-	// service account file.
+	// var (set on the operator Deployment during installation).
 	daemonImage := os.Getenv("DAEMON_IMAGE")
 	if daemonImage == "" {
 		setupLog.Info("DAEMON_IMAGE not set, skipping daemon DaemonSet management")
 	} else {
-		operatorNamespace := os.Getenv("POD_NAMESPACE")
-		if operatorNamespace == "" {
-			// Fall back to reading the namespace from the service
-			// account mounted by the kubelet. This is the standard
-			// way to determine the namespace when running in-cluster.
-			nsBytes, readErr := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace")
-			if readErr != nil {
-				setupLog.Info("Could not determine operator namespace, defaulting to bootc-operator-system")
-				operatorNamespace = "bootc-operator-system"
-			} else {
-				operatorNamespace = string(nsBytes)
-			}
-		}
-
 		dsReconciler := &controller.DaemonSetReconciler{
 			Client:      mgr.GetClient(),
 			Scheme:      mgr.GetScheme(),

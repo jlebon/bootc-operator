@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -83,9 +82,10 @@ const (
 // BootcNodePoolReconciler reconciles a BootcNodePool object
 type BootcNodePoolReconciler struct {
 	client.Client
-	Scheme   *runtime.Scheme
-	Drainer  drain.Drainer
-	Recorder record.EventRecorder
+	Scheme        *runtime.Scheme
+	Drainer       drain.Drainer
+	Recorder      record.EventRecorder
+	ImageResolver ImageResolver
 
 	// Now returns the current time. Defaults to time.Now. Override in
 	// tests to control time-dependent behavior (e.g. health check
@@ -127,6 +127,7 @@ func (r *BootcNodePoolReconciler) recordEventf(obj runtime.Object, eventType, re
 // +kubebuilder:rbac:groups="",resources=nodes,verbs=get;list;watch;update;patch
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;delete
 // +kubebuilder:rbac:groups="",resources=pods/eviction,verbs=create
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;list;watch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 // Reconcile moves the cluster closer to the desired state defined by a
@@ -175,8 +176,12 @@ func (r *BootcNodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 		return r.reconcileDelete(ctx, pool)
 	}
 
-	// 5. Resolve image reference.
-	desiredImage := resolveImage(pool.Spec.Image)
+	// 5. Resolve image reference (tag → digest).
+	desiredImage, err := r.resolveImage(ctx, pool)
+	if err != nil {
+		log.Error(err, "Failed to resolve image", "image", pool.Spec.Image)
+		return ctrl.Result{RequeueAfter: reResolutionInterval}, nil
+	}
 
 	// 6. List all BootcNodes in the cluster.
 	bootcNodeList := &v1alpha1.BootcNodeList{}
@@ -473,13 +478,21 @@ func (r *BootcNodePoolReconciler) releaseBootcNode(ctx context.Context, bn *v1al
 	return nil
 }
 
-// resolveImage extracts the image digest from an image reference. For
-// MVP, if the reference contains @sha256:, we treat it as already
-// resolved. Otherwise, we use the tag reference as-is (full digest
-// resolution via go-containerregistry is deferred to the digest resolver
-// item in the plan).
-func resolveImage(imageRef string) string {
-	return imageRef
+// resolveImage resolves the pool's image reference to a digest. If an
+// ImageResolver is configured, it resolves tags to digests via the
+// registry. Otherwise, it returns the image reference as-is (useful in
+// tests that don't need digest resolution).
+func (r *BootcNodePoolReconciler) resolveImage(ctx context.Context, pool *v1alpha1.BootcNodePool) (string, error) {
+	imageRef := pool.Spec.Image
+	secretName := pool.Spec.ImagePullSecret.Name
+
+	if r.ImageResolver != nil {
+		return r.ImageResolver.Resolve(ctx, imageRef, secretName)
+	}
+
+	// No resolver configured: pass-through (for tests and when
+	// registry resolution is not needed).
+	return imageRef, nil
 }
 
 // updateStatus re-fetches the pool, computes status from the claimed
@@ -496,7 +509,7 @@ func (r *BootcNodePoolReconciler) updateStatus(ctx context.Context, key types.Na
 	pool.Status.ObservedGeneration = pool.Generation
 	pool.Status.TargetNodes = targetNodes
 
-	if strings.Contains(desiredImage, "@sha256:") {
+	if isDigestReference(desiredImage) {
 		pool.Status.ResolvedDigest = desiredImage
 	}
 
