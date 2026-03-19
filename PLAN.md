@@ -1197,10 +1197,11 @@ in the controller.
       - Uncordon nodes that completed rebooting and are running the
         desired image
       - Reset desiredPhase to Staged after successful reboot
-- [ ] Health check: track time since desiredPhase was set to Rebooting.
+- [x] Health check: track time since desiredPhase was set to Rebooting.
       If node doesn't become Ready within healthCheck.timeout → trigger
-      rollback (set desiredPhase=RollingBack)
-- [ ] On rollback trigger: set pool phase to Degraded, stop rollout
+      rollback (set desiredPhase=RollingBack). Implemented in item 9.
+- [x] On rollback trigger: set pool phase to Degraded, stop rollout.
+      Implemented in item 9.
 
 ### 7. Drain manager
 
@@ -1236,36 +1237,51 @@ in the controller.
 
 ### 8. Soft reboot
 
-- [ ] Daemon: when `desiredPhase=Rebooting`, read `spec.rebootPolicy`:
+- [x] Daemon: when `desiredPhase=Rebooting`, read `spec.rebootPolicy`:
       - `Auto`: check `status.staged.softRebootCapable`. If true, pass
         `--soft-reboot=auto` to bootc. If false, full reboot.
       - `Full`: always full reboot (don't pass `--soft-reboot`).
       - `Never`: stage only, do not reboot (daemon sets phase=Staged and
         waits; operator should not set desiredPhase=Rebooting for Never).
-- [ ] BootcNode status: daemon populates `softRebootCapable` from
-      `bootc status --json` staged deployment info.
-- [ ] Pool reconciler: copy `disruption.rebootPolicy` from BootcNodePool
-      to `spec.rebootPolicy` on each claimed BootcNode.
+      Implemented in `daemon.go` as `shouldSoftReboot()` method with
+      unit tests (8 tests covering Auto/Full/Never with and without
+      softRebootCapable).
+- [x] BootcNode status: daemon populates `softRebootCapable` from
+      `bootc status --json` staged deployment info. Implemented in
+      `pkg/bootc/status.go` via `ToBootEntryStatus`.
+- [x] Pool reconciler: copy `disruption.rebootPolicy` from BootcNodePool
+      to `spec.rebootPolicy` on each claimed BootcNode. Implemented in
+      `claimBootcNode()` in `bootcnodepool_controller.go`.
 
 ### 9. Auto rollback
 
-- [ ] Operator: when advancing a BootcNode to desiredPhase=Rebooting,
+- [x] Operator: when advancing a BootcNode to desiredPhase=Rebooting,
       set a `bootc.dev/rebooting-since` annotation with the current
       RFC3339 timestamp. This is level-based (survives operator restarts).
-- [ ] On each reconcile: `checkRebootTimeouts()` compares the annotation
+      Implemented in `advanceNodesToRebooting()`.
+- [x] On each reconcile: `checkRebootTimeouts()` compares the annotation
       timestamp against `healthCheck.timeout`. If exceeded, set
-      desiredPhase=RollingBack.
-- [ ] Daemon: handle RollingBack phase → run `bootc rollback --apply`.
-- [ ] Operator: `handleCompletedRollbacks()` detects nodes that completed
+      desiredPhase=RollingBack. Implemented with injectable `Now`
+      function for testability.
+- [x] Daemon: handle RollingBack phase → run `bootc rollback --apply`.
+      Implemented in `daemon.go` as `reconcileRollingBack()`.
+- [x] Operator: `handleCompletedRollbacks()` detects nodes that completed
       rollback (desiredPhase=RollingBack, status.Phase=Ready, booted
       image != desired). Uncordons the node, clears the rebooting-since
       annotation, resets desiredPhase=Staged, sets status.Phase=Error.
       This triggers Degraded condition on the pool, stopping rollout.
-- [ ] On successful reboot: `uncordonReadyNodes()` clears the
+- [x] On successful reboot: `uncordonReadyNodes()` clears the
       rebooting-since annotation.
-- [ ] If rollback fails (node unreachable): bootloader falls back
+- [x] If rollback fails (node unreachable): bootloader falls back
       automatically (A/B boot). Operator detects old image in BootcNode
       status after node returns.
+- [x] Unit tests (5 new Ginkgo tests): annotation set on advance,
+      timeout triggers RollingBack, completed rollback sets Error and
+      uncordons, annotation cleared on success, no rollback before
+      timeout. Controller coverage: 75.5%.
+- [x] Refactored `orchestrateRollout()` to extract
+      `countUpdatingAndStaged()`, `allNodesStaged()`, and
+      `advanceNodesToRebooting()` helpers to satisfy gocyclo lint.
 
 ### 10. Events
 

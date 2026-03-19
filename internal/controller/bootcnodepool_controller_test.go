@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -629,6 +630,297 @@ var _ = Describe("BootcNodePool Controller", func() {
 			// Verify pool is gone.
 			err = k8sClient.Get(ctx, types.NamespacedName{Name: poolName}, pool)
 			Expect(errors.IsNotFound(err)).To(BeTrue())
+		})
+	})
+
+	Context("When advancing a node to Rebooting", func() {
+		It("should set the rebooting-since annotation", func() {
+			node := createNode(ctx, "worker-anno-1", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "worker-anno-1", node.UID)
+
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			// Reconcile to claim.
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate daemon staging the image.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-anno-1"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseStaged
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile: should advance to Rebooting with annotation.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify annotation was set.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-anno-1"}, bn)).To(Succeed())
+			Expect(bn.Annotations).To(HaveKey(rebootingSinceAnnotation))
+			Expect(bn.Annotations[rebootingSinceAnnotation]).NotTo(BeEmpty())
+		})
+	})
+
+	Context("When a rebooting node exceeds the health check timeout", func() {
+		It("should trigger rollback by setting desiredPhase to RollingBack", func() {
+			node := createNode(ctx, "worker-timeout-1", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "worker-timeout-1", node.UID)
+
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
+
+			// Use a fixed "now" time to control timeout behavior.
+			fakeNow := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+			reconciler.Now = func() time.Time { return fakeNow }
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			// Reconcile to claim.
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate daemon staging the image.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-timeout-1"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseStaged
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile: should advance to Rebooting with annotation
+			// set to fakeNow.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify it's Rebooting.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-timeout-1"}, bn)).To(Succeed())
+			Expect(bn.Spec.DesiredPhase).To(Equal(bootcdevv1alpha1.BootcNodeDesiredPhaseRebooting))
+
+			// Advance time past the default 5m timeout.
+			fakeNow = fakeNow.Add(6 * time.Minute)
+
+			// Simulate the daemon has set Rebooting status but node
+			// hasn't come back yet (still rebooting).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-timeout-1"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseRebooting
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile: should detect timeout and trigger rollback.
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify node was set to RollingBack.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-timeout-1"}, bn)).To(Succeed())
+			Expect(bn.Spec.DesiredPhase).To(Equal(bootcdevv1alpha1.BootcNodeDesiredPhaseRollingBack))
+		})
+	})
+
+	Context("When a node completes rollback", func() {
+		It("should uncordon, set Error phase, and degrade the pool", func() {
+			node := createNode(ctx, "worker-rollback-1", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "worker-rollback-1", node.UID)
+
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
+
+			fakeNow := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+			reconciler.Now = func() time.Time { return fakeNow }
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			// Reconcile to claim.
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate daemon staging, then advance to Rebooting.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-rollback-1"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseStaged
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Advance past timeout.
+			fakeNow = fakeNow.Add(6 * time.Minute)
+
+			// Mark node as rebooting (daemon started).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-rollback-1"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseRebooting
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile to trigger timeout → RollingBack.
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify RollingBack was set.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-rollback-1"}, bn)).To(Succeed())
+			Expect(bn.Spec.DesiredPhase).To(Equal(bootcdevv1alpha1.BootcNodeDesiredPhaseRollingBack))
+
+			// Simulate daemon completed rollback: node is Ready on
+			// old image, and the node is cordoned.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-rollback-1"}, node)).To(Succeed())
+			node.Spec.Unschedulable = true
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-rollback-1"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseReady
+			// Still on old digest -- the rollback put us back.
+			bn.Status.BootedDigest = "sha256:olddigest1234567890abcdef1234567890abcdef1234567890abcdef12345678"
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile to handle completed rollback.
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify uncordon was called.
+			Expect(drainer.uncordonedNodes).To(ContainElement("worker-rollback-1"))
+
+			// Verify BootcNode is in Error state.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-rollback-1"}, bn)).To(Succeed())
+			Expect(bn.Status.Phase).To(Equal(bootcdevv1alpha1.BootcNodePhaseError))
+			Expect(bn.Status.Message).To(ContainSubstring("Rollback completed"))
+			Expect(bn.Spec.DesiredPhase).To(Equal(bootcdevv1alpha1.BootcNodeDesiredPhaseStaged))
+			Expect(bn.Annotations).NotTo(HaveKey(rebootingSinceAnnotation))
+
+			// Verify pool is Degraded.
+			pool := &bootcdevv1alpha1.BootcNodePool{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: poolName}, pool)).To(Succeed())
+			Expect(pool.Status.Phase).To(Equal(bootcdevv1alpha1.BootcNodePoolPhaseDegraded))
+		})
+	})
+
+	Context("When a node reboots successfully", func() {
+		It("should clear the rebooting-since annotation", func() {
+			node := createNode(ctx, "worker-clear-1", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "worker-clear-1", node.UID)
+
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			// Reconcile to claim.
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate daemon staging.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-clear-1"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseStaged
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile: advance to Rebooting with annotation.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify annotation was set.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-clear-1"}, bn)).To(Succeed())
+			Expect(bn.Annotations).To(HaveKey(rebootingSinceAnnotation))
+
+			// Simulate successful reboot: node is Ready on desired
+			// image, node is cordoned.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-clear-1"}, node)).To(Succeed())
+			node.Spec.Unschedulable = true
+			Expect(k8sClient.Update(ctx, node)).To(Succeed())
+
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-clear-1"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseReady
+			bn.Status.BootedDigest = testDigest
+			bn.Status.Booted = bootcdevv1alpha1.BootEntryStatus{
+				Image: fmt.Sprintf("quay.io/example/test-image@%s", testDigest),
+			}
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile: should uncordon and clear annotation.
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify annotation was cleared.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-clear-1"}, bn)).To(Succeed())
+			Expect(bn.Annotations).NotTo(HaveKey(rebootingSinceAnnotation))
+			Expect(bn.Spec.DesiredPhase).To(Equal(bootcdevv1alpha1.BootcNodeDesiredPhaseStaged))
+		})
+	})
+
+	Context("When reboot timeout has not been exceeded", func() {
+		It("should not trigger rollback", func() {
+			node := createNode(ctx, "worker-notimeout-1", map[string]string{workerLabel: ""})
+			bn := createBootcNode(ctx, "worker-notimeout-1", node.UID)
+
+			drainer := &fakeDrainer{}
+			reconciler.Drainer = drainer
+
+			fakeNow := time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+			reconciler.Now = func() time.Time { return fakeNow }
+
+			createPool(ctx, poolName, map[string]string{workerLabel: ""})
+
+			// Reconcile to claim.
+			for range 3 {
+				_, err := reconciler.Reconcile(ctx, reconcile.Request{
+					NamespacedName: types.NamespacedName{Name: poolName},
+				})
+				Expect(err).NotTo(HaveOccurred())
+			}
+
+			// Simulate daemon staging.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-notimeout-1"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseStaged
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile: advance to Rebooting.
+			_, err := reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Only advance 2 minutes (less than 5m timeout).
+			fakeNow = fakeNow.Add(2 * time.Minute)
+
+			// Simulate daemon rebooting.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-notimeout-1"}, bn)).To(Succeed())
+			bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseRebooting
+			Expect(k8sClient.Status().Update(ctx, bn)).To(Succeed())
+
+			// Reconcile: should NOT trigger rollback.
+			_, err = reconciler.Reconcile(ctx, reconcile.Request{
+				NamespacedName: types.NamespacedName{Name: poolName},
+			})
+			Expect(err).NotTo(HaveOccurred())
+
+			// Verify node is still Rebooting (not RollingBack).
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: "worker-notimeout-1"}, bn)).To(Succeed())
+			Expect(bn.Spec.DesiredPhase).To(Equal(bootcdevv1alpha1.BootcNodeDesiredPhaseRebooting))
 		})
 	})
 

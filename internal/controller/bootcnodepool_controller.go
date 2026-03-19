@@ -47,6 +47,12 @@ const (
 	// which pool has claimed them.
 	poolLabelKey = "bootc.dev/pool"
 
+	// rebootingSinceAnnotation is set on BootcNode resources when the
+	// operator advances them to Rebooting. The value is an RFC3339
+	// timestamp. This is level-based (survives operator restarts) and
+	// is used to detect reboot timeouts for auto rollback.
+	rebootingSinceAnnotation = "bootc.dev/rebooting-since"
+
 	// conditionTypeAvailable indicates whether the pool is operating
 	// normally.
 	conditionTypeAvailable = "Available"
@@ -63,6 +69,11 @@ const (
 	// to detect new digests.
 	reResolutionInterval = 5 * time.Minute
 
+	// defaultHealthCheckTimeout is the default duration the operator
+	// waits for a node to become Ready after reboot before triggering
+	// a rollback.
+	defaultHealthCheckTimeout = 5 * time.Minute
+
 	// operatorNamespace is the namespace where the operator is
 	// deployed. Used for looking up pull secrets.
 	// TODO: read from downward API env var instead of hardcoding.
@@ -76,6 +87,19 @@ type BootcNodePoolReconciler struct {
 	DigestResolver    DigestResolver
 	Drainer           drain.Drainer
 	OperatorNamespace string
+
+	// Now returns the current time. Defaults to time.Now when nil.
+	// Injected in tests to control time for health check timeout
+	// testing.
+	Now func() time.Time
+}
+
+// now returns the current time, using the injected function if set.
+func (r *BootcNodePoolReconciler) now() time.Time {
+	if r.Now != nil {
+		return r.Now()
+	}
+	return time.Now()
 }
 
 // +kubebuilder:rbac:groups=bootc.dev,resources=bootcnodepools,verbs=get;list;watch;create;update;patch;delete
@@ -517,7 +541,8 @@ func (r *BootcNodePoolReconciler) computeStatus(
 // orchestrateRollout advances the rollout by selecting staged nodes for
 // reboot, respecting maxUnavailable. It cordons and drains nodes before
 // advancing them to Rebooting, and uncordons nodes that have completed
-// rebooting successfully.
+// rebooting successfully. It also checks for reboot timeouts and
+// triggers auto rollback when nodes fail to come up in time.
 func (r *BootcNodePoolReconciler) orchestrateRollout(
 	ctx context.Context,
 	pool *bootcdevv1alpha1.BootcNodePool,
@@ -531,9 +556,30 @@ func (r *BootcNodePoolReconciler) orchestrateRollout(
 		maxUnavailable = 1
 	}
 
-	// Don't advance if the pool is degraded.
-	if pool.Status.Phase == bootcdevv1alpha1.BootcNodePoolPhaseDegraded {
+	// Handle completed rollbacks first (nodes that rolled back and
+	// are now running the old image again).
+	rollbackCompleted, err := r.handleCompletedRollbacks(ctx, claimedNodes, resolvedDigest)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	// Don't advance if the pool is degraded (either from pre-existing
+	// error nodes or from a rollback that just completed).
+	if pool.Status.Phase == bootcdevv1alpha1.BootcNodePoolPhaseDegraded || rollbackCompleted {
 		return ctrl.Result{}, nil
+	}
+
+	// Check for reboot timeouts: nodes that have been rebooting for
+	// longer than healthCheck.timeout get rolled back.
+	timedOut, err := r.checkRebootTimeouts(ctx, pool, claimedNodes)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if timedOut {
+		// A timeout was detected and rollback initiated. Don't
+		// advance further -- the pool will be set to Degraded on
+		// the next computeStatus.
+		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	// Uncordon nodes that completed rebooting successfully.
@@ -541,38 +587,8 @@ func (r *BootcNodePoolReconciler) orchestrateRollout(
 		return ctrl.Result{}, err
 	}
 
-	// Count currently updating nodes.
-	var currentlyUpdating int32
-	var stagedNodes []*bootcdevv1alpha1.BootcNode
-	for i := range claimedNodes {
-		bn := &claimedNodes[i]
-		switch bn.Status.Phase {
-		case bootcdevv1alpha1.BootcNodePhaseRebooting, bootcdevv1alpha1.BootcNodePhaseRollingBack:
-			currentlyUpdating++
-		case bootcdevv1alpha1.BootcNodePhaseStaged:
-			// Only advance nodes that are staged and not yet at the
-			// desired image.
-			if bn.Status.BootedDigest != resolvedDigest &&
-				bn.Spec.DesiredPhase == bootcdevv1alpha1.BootcNodeDesiredPhaseStaged {
-				stagedNodes = append(stagedNodes, bn)
-			}
-		case bootcdevv1alpha1.BootcNodePhaseReady:
-			// Node completed reboot -- if it was previously set to
-			// Rebooting, it has successfully updated.
-		}
-	}
-
-	// Also count nodes that are cordoned as updating (they are in the
-	// process of being drained or rebooted).
-	for i := range claimedNodes {
-		bn := &claimedNodes[i]
-		if bn.Spec.DesiredPhase == bootcdevv1alpha1.BootcNodeDesiredPhaseRebooting &&
-			bn.Status.Phase == bootcdevv1alpha1.BootcNodePhaseStaged {
-			// Already advancing (cordoned/draining) but daemon
-			// hasn't started rebooting yet.
-			currentlyUpdating++
-		}
-	}
+	// Count currently updating nodes and find staged candidates.
+	currentlyUpdating, stagedNodes := countUpdatingAndStaged(claimedNodes, resolvedDigest)
 
 	// Select batch: how many more can we start?
 	available := maxUnavailable - currentlyUpdating
@@ -582,65 +598,266 @@ func (r *BootcNodePoolReconciler) orchestrateRollout(
 
 	// Don't start reboots unless all nodes have reached the Staged
 	// phase (complete pre-staging before rolling reboots).
-	allStaged := true
-	for i := range claimedNodes {
-		bn := &claimedNodes[i]
-		if bn.Status.BootedDigest == resolvedDigest {
-			continue // already at desired image
-		}
-		if bn.Status.Phase != bootcdevv1alpha1.BootcNodePhaseStaged &&
-			bn.Status.Phase != bootcdevv1alpha1.BootcNodePhaseRebooting &&
-			bn.Status.Phase != bootcdevv1alpha1.BootcNodePhaseReady {
-			allStaged = false
-			break
-		}
-	}
-
-	if !allStaged {
+	if !allNodesStaged(claimedNodes, resolvedDigest) {
 		log.V(1).Info("Waiting for all nodes to finish staging before starting reboots")
 		return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 	}
 
 	// Cordon, drain, and advance staged nodes to Rebooting.
-	for i := int32(0); i < available && i < int32(len(stagedNodes)); i++ {
-		bn := stagedNodes[i]
-
-		// Cordon the node to prevent new pods from scheduling.
-		if r.Drainer != nil {
-			log.Info("Cordoning node before reboot", "node", bn.Name)
-			if err := r.Drainer.Cordon(ctx, bn.Name); err != nil {
-				return ctrl.Result{}, fmt.Errorf("cordoning node %s: %w", bn.Name, err)
-			}
-
-			// Drain the node to evict pods.
-			log.Info("Draining node before reboot", "node", bn.Name)
-			if err := r.Drainer.Drain(ctx, bn.Name); err != nil {
-				return ctrl.Result{}, fmt.Errorf("draining node %s: %w", bn.Name, err)
-			}
-		}
-
-		log.Info("Advancing BootcNode to Rebooting", "node", bn.Name)
-		bn.Spec.DesiredPhase = bootcdevv1alpha1.BootcNodeDesiredPhaseRebooting
-		if err := r.Update(ctx, bn); err != nil {
-			return ctrl.Result{}, fmt.Errorf("advancing BootcNode %s to Rebooting: %w", bn.Name, err)
-		}
+	if err := r.advanceNodesToRebooting(ctx, stagedNodes, available); err != nil {
+		return ctrl.Result{}, err
 	}
 
 	// Requeue soon to check on reboot progress.
 	return ctrl.Result{RequeueAfter: 10 * time.Second}, nil
 }
 
+// countUpdatingAndStaged counts nodes currently in update and finds
+// staged candidates that can be advanced to Rebooting.
+func countUpdatingAndStaged(
+	claimedNodes []bootcdevv1alpha1.BootcNode,
+	resolvedDigest string,
+) (int32, []*bootcdevv1alpha1.BootcNode) {
+	var currentlyUpdating int32
+	var stagedNodes []*bootcdevv1alpha1.BootcNode
+
+	for i := range claimedNodes {
+		bn := &claimedNodes[i]
+		switch bn.Status.Phase {
+		case bootcdevv1alpha1.BootcNodePhaseRebooting, bootcdevv1alpha1.BootcNodePhaseRollingBack:
+			currentlyUpdating++
+		case bootcdevv1alpha1.BootcNodePhaseStaged:
+			if bn.Status.BootedDigest != resolvedDigest &&
+				bn.Spec.DesiredPhase == bootcdevv1alpha1.BootcNodeDesiredPhaseStaged {
+				stagedNodes = append(stagedNodes, bn)
+			}
+		}
+	}
+
+	// Also count nodes that are cordoned as updating (they are in the
+	// process of being drained or rebooted).
+	for i := range claimedNodes {
+		bn := &claimedNodes[i]
+		if bn.Spec.DesiredPhase == bootcdevv1alpha1.BootcNodeDesiredPhaseRebooting &&
+			bn.Status.Phase == bootcdevv1alpha1.BootcNodePhaseStaged {
+			currentlyUpdating++
+		}
+	}
+
+	return currentlyUpdating, stagedNodes
+}
+
+// allNodesStaged checks whether all nodes that need updating have
+// reached the Staged phase (or are already rebooting/ready).
+func allNodesStaged(
+	claimedNodes []bootcdevv1alpha1.BootcNode,
+	resolvedDigest string,
+) bool {
+	for i := range claimedNodes {
+		bn := &claimedNodes[i]
+		if bn.Status.BootedDigest == resolvedDigest {
+			continue
+		}
+		if bn.Status.Phase != bootcdevv1alpha1.BootcNodePhaseStaged &&
+			bn.Status.Phase != bootcdevv1alpha1.BootcNodePhaseRebooting &&
+			bn.Status.Phase != bootcdevv1alpha1.BootcNodePhaseReady {
+			return false
+		}
+	}
+	return true
+}
+
+// advanceNodesToRebooting cordons, drains, and advances staged nodes to
+// the Rebooting phase, setting the rebooting-since annotation for
+// timeout tracking.
+func (r *BootcNodePoolReconciler) advanceNodesToRebooting(
+	ctx context.Context,
+	stagedNodes []*bootcdevv1alpha1.BootcNode,
+	available int32,
+) error {
+	log := logf.FromContext(ctx)
+
+	for i := int32(0); i < available && i < int32(len(stagedNodes)); i++ {
+		bn := stagedNodes[i]
+
+		if r.Drainer != nil {
+			log.Info("Cordoning node before reboot", "node", bn.Name)
+			if err := r.Drainer.Cordon(ctx, bn.Name); err != nil {
+				return fmt.Errorf("cordoning node %s: %w", bn.Name, err)
+			}
+
+			log.Info("Draining node before reboot", "node", bn.Name)
+			if err := r.Drainer.Drain(ctx, bn.Name); err != nil {
+				return fmt.Errorf("draining node %s: %w", bn.Name, err)
+			}
+		}
+
+		log.Info("Advancing BootcNode to Rebooting", "node", bn.Name)
+		bn.Spec.DesiredPhase = bootcdevv1alpha1.BootcNodeDesiredPhaseRebooting
+
+		// Set the rebooting-since annotation to track the timeout.
+		if bn.Annotations == nil {
+			bn.Annotations = make(map[string]string)
+		}
+		bn.Annotations[rebootingSinceAnnotation] = r.now().UTC().Format(time.RFC3339)
+
+		if err := r.Update(ctx, bn); err != nil {
+			return fmt.Errorf("advancing BootcNode %s to Rebooting: %w", bn.Name, err)
+		}
+	}
+
+	return nil
+}
+
+// getHealthCheckTimeout returns the health check timeout for a pool,
+// defaulting to 5 minutes if not specified.
+func getHealthCheckTimeout(pool *bootcdevv1alpha1.BootcNodePool) time.Duration {
+	if pool.Spec.HealthCheck.Timeout.Duration > 0 {
+		return pool.Spec.HealthCheck.Timeout.Duration
+	}
+	return defaultHealthCheckTimeout
+}
+
+// checkRebootTimeouts checks if any rebooting nodes have exceeded the
+// health check timeout. If so, it triggers a rollback by setting
+// desiredPhase to RollingBack. Returns true if a timeout was detected.
+func (r *BootcNodePoolReconciler) checkRebootTimeouts(
+	ctx context.Context,
+	pool *bootcdevv1alpha1.BootcNodePool,
+	claimedNodes []bootcdevv1alpha1.BootcNode,
+) (bool, error) {
+	log := logf.FromContext(ctx)
+	timeout := getHealthCheckTimeout(pool)
+	now := r.now()
+	timedOut := false
+
+	for i := range claimedNodes {
+		bn := &claimedNodes[i]
+
+		// Only check nodes that are in the Rebooting phase (either
+		// desired or actual).
+		if bn.Spec.DesiredPhase != bootcdevv1alpha1.BootcNodeDesiredPhaseRebooting {
+			continue
+		}
+
+		// Skip nodes that are already rolling back.
+		if bn.Status.Phase == bootcdevv1alpha1.BootcNodePhaseRollingBack {
+			continue
+		}
+
+		// Check the rebooting-since annotation.
+		sinceStr, ok := bn.Annotations[rebootingSinceAnnotation]
+		if !ok {
+			continue
+		}
+
+		since, err := time.Parse(time.RFC3339, sinceStr)
+		if err != nil {
+			log.Error(err, "Failed to parse rebooting-since annotation",
+				"node", bn.Name, "value", sinceStr)
+			continue
+		}
+
+		if now.Sub(since) <= timeout {
+			continue
+		}
+
+		// Timeout exceeded. Trigger rollback.
+		log.Info("Reboot timeout exceeded, triggering rollback",
+			"node", bn.Name,
+			"timeout", timeout,
+			"elapsed", now.Sub(since))
+
+		bn.Spec.DesiredPhase = bootcdevv1alpha1.BootcNodeDesiredPhaseRollingBack
+		if err := r.Update(ctx, bn); err != nil {
+			return false, fmt.Errorf("triggering rollback on node %s: %w", bn.Name, err)
+		}
+		timedOut = true
+	}
+
+	return timedOut, nil
+}
+
+// handleCompletedRollbacks detects nodes that have completed a rollback
+// (desiredPhase is RollingBack, status is Ready, booted image differs
+// from the desired image). It uncordons them, clears the rebooting-since
+// annotation, resets desiredPhase to Staged, and sets the node's status
+// phase to Error. This will trigger Degraded condition on the pool.
+// Returns true if any rollback was completed.
+func (r *BootcNodePoolReconciler) handleCompletedRollbacks(
+	ctx context.Context,
+	claimedNodes []bootcdevv1alpha1.BootcNode,
+	resolvedDigest string,
+) (bool, error) {
+	log := logf.FromContext(ctx)
+	completed := false
+
+	for i := range claimedNodes {
+		bn := &claimedNodes[i]
+
+		// A completed rollback: operator told the node to roll back,
+		// the node is Ready but on a different (old) image.
+		if bn.Spec.DesiredPhase != bootcdevv1alpha1.BootcNodeDesiredPhaseRollingBack {
+			continue
+		}
+		if bn.Status.Phase != bootcdevv1alpha1.BootcNodePhaseReady {
+			continue
+		}
+		if bn.Status.BootedDigest == resolvedDigest {
+			// Somehow the node ended up on the desired image after
+			// rollback -- treat as successful.
+			continue
+		}
+
+		log.Info("Node completed rollback to previous image",
+			"node", bn.Name,
+			"bootedDigest", bn.Status.BootedDigest)
+
+		// Uncordon the node.
+		if r.Drainer != nil {
+			node := &corev1.Node{}
+			if err := r.Get(ctx, types.NamespacedName{Name: bn.Name}, node); err == nil {
+				if node.Spec.Unschedulable {
+					log.Info("Uncordoning node after rollback", "node", bn.Name)
+					if err := r.Drainer.Uncordon(ctx, bn.Name); err != nil {
+						log.Error(err, "Failed to uncordon node after rollback", "node", bn.Name)
+					}
+				}
+			}
+		}
+
+		// Clear the rebooting-since annotation.
+		delete(bn.Annotations, rebootingSinceAnnotation)
+
+		// Reset desiredPhase so the daemon stops trying to roll back.
+		bn.Spec.DesiredPhase = bootcdevv1alpha1.BootcNodeDesiredPhaseStaged
+
+		if err := r.Update(ctx, bn); err != nil {
+			return false, fmt.Errorf("updating BootcNode %s after rollback: %w", bn.Name, err)
+		}
+
+		// Set the node's status to Error so computeStatus picks it
+		// up as degraded.
+		bn.Status.Phase = bootcdevv1alpha1.BootcNodePhaseError
+		bn.Status.Message = "Rollback completed: node failed to boot into desired image within timeout"
+		if err := r.Status().Update(ctx, bn); err != nil {
+			return false, fmt.Errorf("setting Error status on BootcNode %s after rollback: %w", bn.Name, err)
+		}
+
+		completed = true
+	}
+
+	return completed, nil
+}
+
 // uncordonReadyNodes uncordons nodes that have completed rebooting and
-// are now running the desired image.
+// are now running the desired image. It also clears the rebooting-since
+// annotation on successful reboot.
 func (r *BootcNodePoolReconciler) uncordonReadyNodes(
 	ctx context.Context,
 	claimedNodes []bootcdevv1alpha1.BootcNode,
 	resolvedDigest string,
 ) error {
-	if r.Drainer == nil {
-		return nil
-	}
-
 	log := logf.FromContext(ctx)
 
 	for i := range claimedNodes {
@@ -658,17 +875,22 @@ func (r *BootcNodePoolReconciler) uncordonReadyNodes(
 		}
 
 		// Check if the node is actually cordoned.
-		node := &corev1.Node{}
-		if err := r.Get(ctx, types.NamespacedName{Name: bn.Name}, node); err != nil {
-			return fmt.Errorf("getting node %s for uncordon: %w", bn.Name, err)
-		}
+		if r.Drainer != nil {
+			node := &corev1.Node{}
+			if err := r.Get(ctx, types.NamespacedName{Name: bn.Name}, node); err != nil {
+				return fmt.Errorf("getting node %s for uncordon: %w", bn.Name, err)
+			}
 
-		if node.Spec.Unschedulable {
-			log.Info("Uncordoning node after successful reboot", "node", bn.Name)
-			if err := r.Drainer.Uncordon(ctx, bn.Name); err != nil {
-				return fmt.Errorf("uncordoning node %s: %w", bn.Name, err)
+			if node.Spec.Unschedulable {
+				log.Info("Uncordoning node after successful reboot", "node", bn.Name)
+				if err := r.Drainer.Uncordon(ctx, bn.Name); err != nil {
+					return fmt.Errorf("uncordoning node %s: %w", bn.Name, err)
+				}
 			}
 		}
+
+		// Clear the rebooting-since annotation on successful reboot.
+		delete(bn.Annotations, rebootingSinceAnnotation)
 
 		// Reset desiredPhase to Staged since the node has completed
 		// the reboot cycle successfully.
