@@ -191,6 +191,9 @@ func (r *DaemonSetReconciler) buildDaemonSet() *appsv1.DaemonSet {
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: daemonSetName,
+					// hostPID is needed so the daemon can use nsenter to
+					// enter PID 1's mount namespace for bootc commands.
+					HostPID: true,
 					// Run on all nodes except those with the skip label.
 					Affinity: &corev1.Affinity{
 						NodeAffinity: &corev1.NodeAffinity{
@@ -228,6 +231,13 @@ func (r *DaemonSetReconciler) buildDaemonSet() *appsv1.DaemonSet {
 							},
 							SecurityContext: &corev1.SecurityContext{
 								Privileged: &privileged,
+								// Explicitly set Unconfined seccomp. On K8s
+								// 1.27+ with SeccompDefault, the RuntimeDefault
+								// profile is applied even to privileged containers
+								// on some containerd versions, blocking chroot.
+								SeccompProfile: &corev1.SeccompProfile{
+									Type: corev1.SeccompProfileTypeUnconfined,
+								},
 							},
 							VolumeMounts: []corev1.VolumeMount{
 								{

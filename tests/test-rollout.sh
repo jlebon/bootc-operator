@@ -39,6 +39,32 @@ dump_debug() {
     kubectl -n "${NAMESPACE}" logs -l control-plane=controller-manager --tail=50 2>/dev/null || true
     echo "--- Daemon pods describe ---"
     kubectl -n "${NAMESPACE}" describe pods -l app.kubernetes.io/name=bootc-daemon 2>/dev/null || true
+    echo "--- Daemon pod security context ---"
+    kubectl -n "${NAMESPACE}" get pods -l app.kubernetes.io/name=bootc-daemon -o jsonpath='{.items[0].spec.containers[0].securityContext}' 2>/dev/null || true
+    echo ""
+    echo "--- Daemon pod hostPID ---"
+    kubectl -n "${NAMESPACE}" get pods -l app.kubernetes.io/name=bootc-daemon -o jsonpath='hostPID={.items[0].spec.hostPID}' 2>/dev/null || true
+    echo ""
+    echo "--- DaemonSet hostPID ---"
+    kubectl -n "${NAMESPACE}" get daemonset bootc-daemon -o jsonpath='hostPID={.spec.template.spec.hostPID}' 2>/dev/null || true
+    echo ""
+    echo "--- SELinux status ---"
+    getenforce 2>/dev/null || true
+    echo "--- Daemon process status ---"
+    local daemon_pid
+    daemon_pid=$(kubectl -n "${NAMESPACE}" exec ds/bootc-daemon -- cat /proc/1/status 2>/dev/null | grep -E 'NoNewPriv|Seccomp|Cap' || true)
+    echo "${daemon_pid}"
+    echo "--- Daemon rootfs mount info ---"
+    kubectl -n "${NAMESPACE}" exec ds/bootc-daemon -- mount 2>/dev/null | grep -E '/run/rootfs|overlay' | head -5 || true
+    kubectl -n "${NAMESPACE}" exec ds/bootc-daemon -- ls -la /run/rootfs/usr/bin/bootc 2>/dev/null || true
+    echo "--- Try chroot from inside daemon pod ---"
+    kubectl -n "${NAMESPACE}" exec ds/bootc-daemon -- /run/rootfs/usr/bin/chroot /run/rootfs /usr/bin/bootc status --json 2>&1 | head -5 || true
+    echo "--- Daemon namespaces (self vs host PID 1) ---"
+    echo -n "self: "; kubectl -n "${NAMESPACE}" exec ds/bootc-daemon -- readlink /proc/self/ns/user /proc/self/ns/mnt 2>/dev/null || true
+    echo -n "pid1: "; kubectl -n "${NAMESPACE}" exec ds/bootc-daemon -- readlink /proc/1/ns/user /proc/1/ns/mnt 2>/dev/null || true
+    echo "--- DaemonSet spec ---"
+    kubectl -n "${NAMESPACE}" get daemonset bootc-daemon -o jsonpath='{.spec.template.spec.containers[0].securityContext}' 2>/dev/null || true
+    echo ""
     echo "--- Daemon logs ---"
     kubectl -n "${NAMESPACE}" logs -l app.kubernetes.io/name=bootc-daemon --tail=50 2>/dev/null || true
     echo "--- BootcNodePools ---"

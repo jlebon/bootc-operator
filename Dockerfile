@@ -24,8 +24,10 @@ WORKDIR /
 COPY --from=builder /workspace/bin/operator /manager
 ENTRYPOINT ["/manager"]
 
-# Daemon image
+# Daemon image -- runs as root because it needs to chroot into the host
+# rootfs to execute bootc commands.
 FROM quay.io/hummingbird/core-runtime:latest AS daemon
 WORKDIR /
 COPY --from=builder /workspace/bin/daemon /daemon
+USER 0
 ENTRYPOINT ["/daemon"]

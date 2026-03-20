@@ -158,6 +158,26 @@ systemd:
 
         [Install]
         WantedBy=multi-user.target
+    # Set SELinux to permissive mode. containerd does not enable SELinux
+    # labeling by default, so privileged containers don't get the spc_t
+    # label and can't chroot/nsenter into the host rootfs. Permissive
+    # mode is acceptable for test VMs. Production deployments should
+    # use CRI-O (which has native SELinux integration) or configure
+    # containerd's enable_selinux option with proper policy.
+    - name: selinux-permissive.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Set SELinux to permissive mode
+        Before=containerd.service kubelet.service
+
+        [Service]
+        Type=oneshot
+        RemainAfterExit=true
+        ExecStart=/usr/sbin/setenforce 0
+
+        [Install]
+        WantedBy=multi-user.target
     # FCOS uses a strict signature verification policy. Rewrite the ostree
     # origin file to use the unverified transport so that bootc/rpm-ostree
     # can pull test images without signature checks.

@@ -131,16 +131,29 @@ func (c *Client) Rollback(ctx context.Context, apply bool) error {
 	return nil
 }
 
-// chrootRunner executes commands via chroot into the host rootfs. It
-// clears the `container` environment variable because container runtimes
-// set `container=oci`, which bootc checks to detect container context
-// and returns reduced status.
+// chrootRunner executes commands via chroot into the host rootfs. The
+// `container` environment variable is cleared because container
+// runtimes set `container=oci`, which bootc checks to detect container
+// context and returns reduced status.
+//
+// The DaemonSet pod must run as root (runAsUser: 0) and privileged for
+// chroot to work. The binary path is specified as a rootfs-prefixed
+// path for exec.Command (so Go can stat it), then cmd.Path is
+// overridden to the post-chroot path (so execve resolves it inside
+// the chroot).
 type chrootRunner struct {
 	rootfs string
 }
 
 func (r *chrootRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, name, args...)
+	// Point to the binary inside the rootfs so exec.Command can stat
+	// it. After the chroot, the kernel resolves the post-chroot path
+	// (/usr/bin/<name>) for execve.
+	binPath := "/usr/bin/" + name
+	hostBin := r.rootfs + binPath
+	cmd := exec.CommandContext(ctx, hostBin, args...)
+	cmd.Path = binPath
+	// Chroot the child process into the host rootfs before exec.
 	cmd.SysProcAttr = &syscall.SysProcAttr{
 		Chroot: r.rootfs,
 	}
