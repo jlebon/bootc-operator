@@ -2,6 +2,10 @@
 IMG ?= controller:latest
 DAEMON_IMG ?= daemon:latest
 
+# Image refs used for VM-based e2e tests (test-artifacts / test-vm)
+TEST_IMG ?= localhost/bootc-operator:test
+TEST_DAEMON_IMG ?= localhost/bootc-daemon:test
+
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
 GOBIN=$(shell go env GOPATH)/bin
@@ -87,6 +91,20 @@ test-e2e: setup-test-e2e manifests generate fmt vet ## Run the e2e tests. Expect
 .PHONY: cleanup-test-e2e
 cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 	@$(KIND) delete cluster --name $(KIND_CLUSTER)
+
+.PHONY: test-artifacts
+test-artifacts: ## Build container images and test artifacts for VM-based e2e tests.
+	$(CONTAINER_TOOL) build --target operator -t $(TEST_IMG) .
+	$(CONTAINER_TOOL) build --target daemon -t $(TEST_DAEMON_IMG) .
+	mkdir -p tests/.artifacts
+	$(CONTAINER_TOOL) save -o tests/.artifacts/operator.tar $(TEST_IMG)
+	$(CONTAINER_TOOL) save -o tests/.artifacts/daemon.tar $(TEST_DAEMON_IMG)
+	$(MAKE) build-installer IMG=$(TEST_IMG) DAEMON_IMG=$(TEST_DAEMON_IMG)
+	cp dist/install.yaml tests/.artifacts/install.yaml
+
+.PHONY: test-vm
+test-vm: ## Run VM-based e2e tests (requires test-artifacts and /dev/kvm).
+	tests/run.sh -v $(TEST_VM_ARGS)
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter
