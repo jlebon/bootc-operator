@@ -44,7 +44,7 @@ const (
 
 // BootcClient abstracts the bootc CLI for testability.
 type BootcClient interface {
-	IsBootcHost(ctx context.Context) bool
+	IsBootcHost(ctx context.Context) (bool, error)
 	Status(ctx context.Context) (*bootc.Host, error)
 	Switch(ctx context.Context, image string) error
 	UpgradeDownloadOnly(ctx context.Context) error
@@ -79,7 +79,13 @@ func NewDaemon(nodeName string, pollInterval time.Duration, kubeClient KubeClien
 // If not, it stays idle. If yes, it creates the BootcNode CRD and
 // enters the poll loop.
 func (d *Daemon) Run(ctx context.Context) error {
-	if !d.bootcClient.IsBootcHost(ctx) {
+	isBootc, err := d.bootcClient.IsBootcHost(ctx)
+	if err != nil {
+		d.log.Info("Could not detect bootc on host, staying idle", "error", err)
+		<-ctx.Done()
+		return nil
+	}
+	if !isBootc {
 		d.log.Info("Host is not a bootc system, staying idle")
 		<-ctx.Done()
 		return nil

@@ -123,8 +123,8 @@ func newMockBootcClient() *mockBootcClient {
 	}
 }
 
-func (m *mockBootcClient) IsBootcHost(_ context.Context) bool {
-	return m.isBootcHost
+func (m *mockBootcClient) IsBootcHost(_ context.Context) (bool, error) {
+	return m.isBootcHost, nil
 }
 
 func (m *mockBootcClient) Status(_ context.Context) (*bootc.Host, error) {

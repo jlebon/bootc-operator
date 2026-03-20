@@ -349,7 +349,11 @@ func TestClientIsBootcHost(t *testing.T) {
 	runner.setOutput("bootc status --json", []byte(sampleBootedOnlyJSON), nil)
 	client := NewClientWithRunner(runner)
 
-	if !client.IsBootcHost(context.Background()) {
+	ok, err := client.IsBootcHost(context.Background())
+	if err != nil {
+		t.Errorf("Unexpected error: %v", err)
+	}
+	if !ok {
 		t.Error("Expected IsBootcHost() to return true")
 	}
 }
@@ -359,7 +363,11 @@ func TestClientIsBootcHostFalse(t *testing.T) {
 	runner.setOutput("bootc status --json", nil, fmt.Errorf("bootc not found"))
 	client := NewClientWithRunner(runner)
 
-	if client.IsBootcHost(context.Background()) {
+	ok, err := client.IsBootcHost(context.Background())
+	if err == nil {
+		t.Error("Expected an error")
+	}
+	if ok {
 		t.Error("Expected IsBootcHost() to return false")
 	}
 }

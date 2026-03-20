@@ -57,10 +57,14 @@ func NewClientWithRunner(runner CommandRunner) *Client {
 }
 
 // IsBootcHost returns true if the host has bootc available. It runs
-// `bootc status --json` and checks for a successful exit.
-func (c *Client) IsBootcHost(ctx context.Context) bool {
+// `bootc status --json` and checks for a successful exit. If bootc is
+// not available or the command fails, it returns false and the error.
+func (c *Client) IsBootcHost(ctx context.Context) (bool, error) {
 	_, err := c.runner.Run(ctx, "bootc", "status", "--json")
-	return err == nil
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // Status runs `bootc status --json` and returns the parsed Host.
