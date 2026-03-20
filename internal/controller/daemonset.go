@@ -191,9 +191,6 @@ func (r *DaemonSetReconciler) buildDaemonSet() *appsv1.DaemonSet {
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: daemonSetName,
-					// hostPID is needed so the daemon can use nsenter to
-					// enter PID 1's mount namespace for bootc commands.
-					HostPID: true,
 					// Run on all nodes except those with the skip label.
 					Affinity: &corev1.Affinity{
 						NodeAffinity: &corev1.NodeAffinity{
