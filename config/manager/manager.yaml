@@ -68,6 +68,8 @@ spec:
         env:
           - name: DAEMON_IMAGE
             value: daemon:latest
+          - name: DAEMON_SERVICE_ACCOUNT
+            value: bootc-daemon
           - name: OPERATOR_NAMESPACE
             valueFrom:
               fieldRef:

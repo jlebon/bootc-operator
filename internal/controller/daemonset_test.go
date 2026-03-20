@@ -43,10 +43,11 @@ var _ = Describe("DaemonSet Reconciler", func() {
 	BeforeEach(func() {
 		ctx = context.Background()
 		reconciler = &DaemonSetReconciler{
-			Client:    k8sClient,
-			Scheme:    k8sClient.Scheme(),
-			Namespace: testNamespace,
-			Image:     testDaemonImg,
+			Client:         k8sClient,
+			Scheme:         k8sClient.Scheme(),
+			Namespace:      testNamespace,
+			Image:          testDaemonImg,
+			ServiceAccount: daemonSetName,
 		}
 	})
 
@@ -61,15 +62,6 @@ var _ = Describe("DaemonSet Reconciler", func() {
 			_ = k8sClient.Delete(ctx, ds)
 		}
 
-		// Clean up the ServiceAccount if it exists.
-		sa := &corev1.ServiceAccount{}
-		err = k8sClient.Get(ctx, types.NamespacedName{
-			Name:      daemonSetName,
-			Namespace: testNamespace,
-		}, sa)
-		if err == nil {
-			_ = k8sClient.Delete(ctx, sa)
-		}
 	})
 
 	Context("EnsureDaemonSet", func() {
@@ -114,13 +106,8 @@ var _ = Describe("DaemonSet Reconciler", func() {
 			Expect(ds.Spec.Template.Spec.Tolerations).To(HaveLen(1))
 			Expect(string(ds.Spec.Template.Spec.Tolerations[0].Operator)).To(Equal(string(corev1.TolerationOpExists)))
 
-			// Verify ServiceAccount was created.
-			sa := &corev1.ServiceAccount{}
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Name:      daemonSetName,
-				Namespace: testNamespace,
-			}, sa)).To(Succeed())
-			Expect(sa.Labels["app.kubernetes.io/name"]).To(Equal(daemonSetName))
+			// Verify ServiceAccountName is set on the pod spec.
+			Expect(ds.Spec.Template.Spec.ServiceAccountName).To(Equal(daemonSetName))
 		})
 
 		It("should be idempotent when DaemonSet already exists", func() {

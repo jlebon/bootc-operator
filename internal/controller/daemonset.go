@@ -52,13 +52,13 @@ const (
 // The DaemonSet is a cluster-singleton owned by the operator.
 type DaemonSetReconciler struct {
 	client.Client
-	Scheme    *runtime.Scheme
-	Namespace string
-	Image     string
+	Scheme         *runtime.Scheme
+	Namespace      string
+	Image          string
+	ServiceAccount string
 }
 
 // +kubebuilder:rbac:groups=apps,resources=daemonsets,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups="",resources=serviceaccounts,verbs=get;list;watch;create;update;patch
 
 // Reconcile ensures the daemon DaemonSet exists and has the correct
 // image. It creates the DaemonSet if it does not exist, and updates
@@ -69,11 +69,6 @@ func (r *DaemonSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 	// Only reconcile our own DaemonSet.
 	if req.Name != daemonSetName || req.Namespace != r.Namespace {
 		return ctrl.Result{}, nil
-	}
-
-	// Ensure the ServiceAccount exists.
-	if err := r.ensureServiceAccount(ctx); err != nil {
-		return ctrl.Result{}, fmt.Errorf("ensuring ServiceAccount: %w", err)
 	}
 
 	// Check if the DaemonSet already exists.
@@ -105,11 +100,6 @@ func (r *DaemonSetReconciler) Reconcile(ctx context.Context, req ctrl.Request) (
 func (r *DaemonSetReconciler) EnsureDaemonSet(ctx context.Context) error {
 	log := logf.FromContext(ctx).WithName("daemonset")
 
-	// Ensure the ServiceAccount exists first.
-	if err := r.ensureServiceAccount(ctx); err != nil {
-		return fmt.Errorf("ensuring ServiceAccount: %w", err)
-	}
-
 	existing := &appsv1.DaemonSet{}
 	err := r.Get(ctx, types.NamespacedName{Name: daemonSetName, Namespace: r.Namespace}, existing)
 	if errors.IsNotFound(err) {
@@ -126,24 +116,6 @@ func (r *DaemonSetReconciler) EnsureDaemonSet(ctx context.Context) error {
 
 	// Update if needed.
 	return r.updateDaemonSetIfNeeded(ctx, existing)
-}
-
-// ensureServiceAccount creates the daemon ServiceAccount if it does
-// not exist.
-func (r *DaemonSetReconciler) ensureServiceAccount(ctx context.Context) error {
-	sa := &corev1.ServiceAccount{}
-	err := r.Get(ctx, types.NamespacedName{Name: daemonSetName, Namespace: r.Namespace}, sa)
-	if errors.IsNotFound(err) {
-		sa = &corev1.ServiceAccount{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      daemonSetName,
-				Namespace: r.Namespace,
-				Labels:    daemonLabels(),
-			},
-		}
-		return r.Create(ctx, sa)
-	}
-	return err
 }
 
 // updateDaemonSetIfNeeded updates the DaemonSet's daemon container
@@ -190,7 +162,7 @@ func (r *DaemonSetReconciler) buildDaemonSet() *appsv1.DaemonSet {
 					},
 				},
 				Spec: corev1.PodSpec{
-					ServiceAccountName: daemonSetName,
+					ServiceAccountName: r.ServiceAccount,
 					// Run on all nodes except those with the skip label.
 					Affinity: &corev1.Affinity{
 						NodeAffinity: &corev1.NodeAffinity{

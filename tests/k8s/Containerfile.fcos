@@ -1,0 +1,28 @@
+# Bootable container image: FCOS + CRI-O + Kubernetes
+# Built during `podman build` of the test harness and converted to a qcow2
+# by coreos-assembler.
+FROM quay.io/fedora/fedora-coreos:stable
+
+# Kubernetes v1.35 repo
+RUN cat > /etc/yum.repos.d/kubernetes.repo <<'EOF'
+[kubernetes]
+name=Kubernetes
+baseurl=https://pkgs.k8s.io/core:/stable:/v1.35/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://pkgs.k8s.io/core:/stable:/v1.35/rpm/repodata/repomd.xml.key
+EOF
+
+# CRI-O v1.35 repo
+RUN cat > /etc/yum.repos.d/cri-o.repo <<'EOF'
+[cri-o]
+name=CRI-O
+baseurl=https://download.opensuse.org/repositories/isv:/cri-o:/stable:/v1.35/rpm/
+enabled=1
+gpgcheck=1
+gpgkey=https://download.opensuse.org/repositories/isv:/cri-o:/stable:/v1.35/rpm/repodata/repomd.xml.key
+EOF
+
+RUN dnf install -y kubectl kubelet kubeadm cri-o cri-tools && \
+    dnf clean all && \
+    systemctl enable crio

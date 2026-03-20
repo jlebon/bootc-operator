@@ -202,6 +202,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	daemonServiceAccount := os.Getenv("DAEMON_SERVICE_ACCOUNT")
+	if daemonServiceAccount == "" {
+		daemonServiceAccount = "bootc-daemon"
+	}
+
 	if err := (&controller.BootcNodePoolReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),
@@ -218,10 +223,11 @@ func main() {
 	// The reconciler ensures the DaemonSet exists with the correct
 	// image and watches for drift.
 	dsReconciler := &controller.DaemonSetReconciler{
-		Client:    mgr.GetClient(),
-		Scheme:    mgr.GetScheme(),
-		Namespace: operatorNamespace,
-		Image:     daemonImage,
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		Namespace:      operatorNamespace,
+		Image:          daemonImage,
+		ServiceAccount: daemonServiceAccount,
 	}
 	if err := dsReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "DaemonSet")

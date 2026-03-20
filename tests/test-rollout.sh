@@ -72,7 +72,7 @@ dump_debug() {
     echo "--- BootcNodes ---"
     kubectl get bootcnodes -o yaml 2>/dev/null || true
     echo "--- Container images ---"
-    ctr -n k8s.io images list 2>/dev/null | grep -E 'bootc|REF' || true
+    crictl images 2>/dev/null | grep -E 'bootc|IMAGE' || true
     echo "=== END DEBUG ==="
 }
 
@@ -106,10 +106,10 @@ kubectl_bootcnodepool() {
 
 # --- Test ---
 
-# Step 1: Import container images into containerd
+# Step 1: Import container images into CRI-O's storage
 echo "=== Importing container images ==="
-ctr -n k8s.io images import "${ARTIFACTS}/operator.tar"
-ctr -n k8s.io images import "${ARTIFACTS}/daemon.tar"
+skopeo copy docker-archive:"${ARTIFACTS}/operator.tar" containers-storage:localhost/bootc-operator:test
+skopeo copy docker-archive:"${ARTIFACTS}/daemon.tar" containers-storage:localhost/bootc-daemon:test
 
 # Step 2: Deploy the operator
 echo "=== Deploying operator ==="

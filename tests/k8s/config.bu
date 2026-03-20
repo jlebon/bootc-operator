@@ -7,19 +7,6 @@ storage:
       mode: 0644
       contents:
         inline: ""
-    # Download Kubernetes Binaries
-    - path: /usr/local/bin/kubeadm
-      mode: 0755
-      contents:
-        source: "https://dl.k8s.io/release/v1.35.2/bin/linux/amd64/kubeadm"
-    - path: /usr/local/bin/kubelet
-      mode: 0755
-      contents:
-        source: "https://dl.k8s.io/release/v1.35.2/bin/linux/amd64/kubelet"
-    - path: /usr/local/bin/kubectl
-      mode: 0755
-      contents:
-        source: "https://dl.k8s.io/release/v1.35.2/bin/linux/amd64/kubectl"
     # Flannel requires bridge netfilter to filter traffic crossing Linux bridges
     - path: /etc/modules-load.d/kubernetes.conf
       mode: 0644
@@ -38,6 +25,11 @@ storage:
       mode: 0644
       contents:
         inline: |
+          apiVersion: kubeadm.k8s.io/v1beta4
+          kind: InitConfiguration
+          nodeRegistration:
+            criSocket: unix:///run/crio/crio.sock
+          ---
           apiVersion: kubeadm.k8s.io/v1beta4
           kind: ClusterConfiguration
           networking:
@@ -61,6 +53,15 @@ storage:
       mode: 0644
       contents:
         source: "https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml"
+    # Tell CRI-O to also look in /usr/libexec/cni for CNI plugins (where
+    # the containernetworking-plugins RPM installs them). Also include
+    # /opt/cni/bin where Flannel's init container copies its plugin.
+    - path: /etc/crio/crio.conf.d/10-cni.conf
+      mode: 0644
+      contents:
+        inline: |
+          [crio.network]
+          plugin_dirs = ["/opt/cni/bin", "/usr/libexec/cni"]
     # Shell alias and completions
     - path: /etc/profile.d/kubernetes.sh
       mode: 0644
@@ -69,21 +70,8 @@ storage:
           alias k=kubectl
           source <(kubectl completion bash)
           complete -o default -F __start_kubectl k
-    # Make sure containerd is using systemd for its cgroups driver. Kubelet
-    # inherits this directly from containerd, so we don't need to repeat it
-    # there.
-    - path: /etc/containerd/config.toml
-      mode: 0644
-      overwrite: true
-      contents:
-        inline: |
-          version = 3
-          [plugins.'io.containerd.cri.v1.runtime'.containerd.runtimes.runc.options]
-            SystemdCgroup = true
 systemd:
   units:
-    - name: containerd.service
-      enabled: true
     # Mount the host's /mnt into the VM via virtiofs. This is always
     # present (virtiofsd always runs); the contents depend on what the
     # user bind-mounted into /mnt on the container.
@@ -100,24 +88,6 @@ systemd:
 
         [Install]
         WantedBy=multi-user.target
-    # This is needed by flannel
-    - name: cni-plugins-install.service
-      enabled: true
-      contents: |
-        [Unit]
-        Description=Install CNI plugins (FCOS does not ship them, but Flannel needs at least loopback)
-        Before=kubelet.service
-        After=network-online.target
-        Wants=network-online.target
-
-        [Service]
-        Type=oneshot
-        RemainAfterExit=true
-        ExecStartPre=/usr/bin/mkdir -p /opt/cni/bin
-        ExecStart=/usr/bin/bash -c 'curl -sL https://github.com/containernetworking/plugins/releases/download/v1.6.2/cni-plugins-linux-amd64-v1.6.2.tgz | tar -xz -C /opt/cni/bin'
-
-        [Install]
-        WantedBy=multi-user.target
     - name: kubelet.service
       enabled: true
       contents: |
@@ -125,11 +95,12 @@ systemd:
         Description=kubelet: The Kubernetes Node Agent
         Documentation=https://kubernetes.io/docs/
         Wants=network-online.target
-        After=network-online.target containerd.service cni-plugins-install.service
+        Requires=crio.service
+        After=network-online.target crio.service
 
         [Service]
         ExecStartPre=/usr/bin/mkdir -p /var/lib/kubelet /var/lib/kubelet/volumeplugins
-        ExecStart=/usr/local/bin/kubelet --kubeconfig=/etc/kubernetes/kubelet.conf --config=/var/lib/kubelet/config.yaml --container-runtime-endpoint=unix:///run/containerd/containerd.sock
+        ExecStart=/usr/bin/kubelet --kubeconfig=/etc/kubernetes/kubelet.conf --config=/var/lib/kubelet/config.yaml --container-runtime-endpoint=unix:///run/crio/crio.sock
         Restart=always
         StartLimitInterval=0
         RestartSec=10
@@ -148,33 +119,13 @@ systemd:
         [Service]
         Type=oneshot
         RemainAfterExit=true
-        ExecStart=/usr/local/bin/kubeadm init --config=/etc/kubernetes/kubeadm.conf
+        ExecStart=/usr/bin/kubeadm init --config=/etc/kubernetes/kubeadm.conf
         # Allow scheduling workloads on the control plane (single-node cluster)
-        ExecStart=/usr/local/bin/kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane-
+        ExecStart=/usr/bin/kubectl --kubeconfig=/etc/kubernetes/admin.conf taint nodes --all node-role.kubernetes.io/control-plane-
         ExecStart=/usr/bin/mkdir -p /home/core/.kube
         ExecStart=/usr/bin/cp /etc/kubernetes/admin.conf /home/core/.kube/config
         ExecStart=/usr/bin/chown -R core:core /home/core/.kube
-        ExecStart=/usr/local/bin/kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /etc/kubernetes/flannel.yml
-
-        [Install]
-        WantedBy=multi-user.target
-    # Set SELinux to permissive mode. containerd does not support
-    # SELinux labeling out of the box (its enable_selinux option
-    # breaks kubeadm on FCOS because FCOS lacks the Kubernetes-
-    # specific SELinux policy modules that RHCOS ships). Without
-    # labeling, privileged containers can't chroot into the host
-    # rootfs. Permissive mode is acceptable for test VMs.
-    - name: selinux-permissive.service
-      enabled: true
-      contents: |
-        [Unit]
-        Description=Set SELinux to permissive mode
-        Before=containerd.service kubelet.service
-
-        [Service]
-        Type=oneshot
-        RemainAfterExit=true
-        ExecStart=/usr/sbin/setenforce 0
+        ExecStart=/usr/bin/kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /etc/kubernetes/flannel.yml
 
         [Install]
         WantedBy=multi-user.target

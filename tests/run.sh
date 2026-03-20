@@ -61,10 +61,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Build test image if needed
+# Build test image if needed. The cosa stage inside the Containerfile
+# needs /dev/kvm for osbuild and --privileged for nested podman builds.
 if ! podman image exists "${IMAGE_TAG}"; then
     echo "Building test image ${IMAGE_TAG}..."
-    podman build -t "${IMAGE_TAG}" "${SCRIPT_DIR}/k8s/"
+    tmpdir=$(mktemp -d)
+    trap "rm -rf ${tmpdir}" EXIT
+    podman build \
+        --device /dev/kvm \
+        --device /dev/fuse \
+        --security-opt label=disable \
+        --cap-add all \
+        -v "${tmpdir}":/var/lib/containers \
+        -t "${IMAGE_TAG}" "${SCRIPT_DIR}/k8s/"
 fi
 
 # Find test scripts

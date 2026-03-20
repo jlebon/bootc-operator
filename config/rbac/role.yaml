@@ -38,17 +38,6 @@ rules:
   - watch
 - apiGroups:
   - ""
-  resources:
-  - serviceaccounts
-  verbs:
-  - create
-  - get
-  - list
-  - patch
-  - update
-  - watch
-- apiGroups:
-  - ""
   - events.k8s.io
   resources:
   - events

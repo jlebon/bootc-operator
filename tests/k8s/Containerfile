@@ -1,20 +1,42 @@
-FROM quay.io/fedora/fedora-minimal
-
+# Stage 1: runtime tools for running the test VM
+FROM quay.io/fedora/fedora-minimal AS base
 ARG DNF_FLAGS="-y --setopt=install_weak_deps=False"
 RUN dnf install ${DNF_FLAGS} \
         qemu-system-x86-core qemu-img butane virtiofsd \
         openssh-clients curl xz jq && \
     dnf clean all
 
-# Download the latest stable FCOS qemu qcow2 image.
-RUN STREAM=https://builds.coreos.fedoraproject.org/streams/stable.json && \
-    URL=$(curl -sSfL "${STREAM}" | \
-      jq -r '.architectures.x86_64.artifacts.qemu.formats["qcow2.xz"].disk.location') && \
-    mkdir -p /usr/share/fcos && \
-    curl -sSfL "${URL}" | xzcat > /usr/share/fcos/image.qcow2
+# Stage 2: build a custom FCOS qcow2 with CRI-O + Kubernetes baked in.
+# This stage requires --device /dev/kvm and --security-opt label=disable
+# at build time (passed by run.sh).
+FROM quay.io/coreos-assembler/coreos-assembler:latest AS qcow2-builder
+USER root
+COPY Containerfile.fcos /tmp/Containerfile.fcos
+# Build the bootable container image using an inner podman build.
+# Run as root to avoid user namespace issues inside the build container.
+# Save as OCI archive so the builder user (cosa) can access it.
+RUN podman build --storage-driver overlay \
+        -t localhost/fcos-k8s:latest -f /tmp/Containerfile.fcos /tmp && \
+    podman save --format oci-archive -o /tmp/fcos-k8s.ociarchive \
+        localhost/fcos-k8s:latest && \
+    podman rmi localhost/fcos-k8s:latest
+# Import the OCI archive into cosa and build a qcow2.
+# cosa needs builds/ and tmp/ dirs; we skip `cosa init` since we don't
+# need a config git repo for the import-only workflow.
+USER builder
+WORKDIR /srv
+RUN mkdir -p builds tmp cache && \
+    cosa import oci-archive:/tmp/fcos-k8s.ociarchive && \
+    cosa osbuild qemu
 
+# Stage 3: final test harness image
+FROM base
+RUN mkdir -p /usr/share/fcos
+# Copy the qcow2 from the cosa build. The exact filename depends on the
+# FCOS version, so use a glob.
+COPY --from=qcow2-builder /srv/builds/latest/x86_64/*-qemu.x86_64.qcow2 \
+     /usr/share/fcos/image.qcow2
 COPY config.bu /usr/share/fcos/config.bu
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
-
 ENTRYPOINT ["/entrypoint.sh"]

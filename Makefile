@@ -171,6 +171,12 @@ build-installer: manifests generate kustomize ## Generate a consolidated YAML wi
 	cd config/manager && "$(KUSTOMIZE)" edit set image controller=${IMG}
 	@sed -i 's|value: daemon:latest|value: $(DAEMON_IMG)|' config/manager/manager.yaml
 	"$(KUSTOMIZE)" build config/default > dist/install.yaml
+	@# Kustomize applies namePrefix to resource names (including the
+	@# ServiceAccount) but not to env var values. Patch the generated
+	@# install.yaml so DAEMON_SERVICE_ACCOUNT matches the actual SA name.
+	@grep -q 'namePrefix' config/default/kustomization.yaml && \
+		prefix=$$(grep 'namePrefix:' config/default/kustomization.yaml | awk '{print $$2}') && \
+		sed -i "s|value: bootc-daemon|value: $${prefix}bootc-daemon|" dist/install.yaml || true
 	@sed -i 's|value: $(DAEMON_IMG)|value: daemon:latest|' config/manager/manager.yaml
 
 ##@ Deployment
