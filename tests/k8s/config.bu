@@ -158,12 +158,12 @@ systemd:
 
         [Install]
         WantedBy=multi-user.target
-    # Set SELinux to permissive mode. containerd does not enable SELinux
-    # labeling by default, so privileged containers don't get the spc_t
-    # label and can't chroot/nsenter into the host rootfs. Permissive
-    # mode is acceptable for test VMs. Production deployments should
-    # use CRI-O (which has native SELinux integration) or configure
-    # containerd's enable_selinux option with proper policy.
+    # Set SELinux to permissive mode. containerd does not support
+    # SELinux labeling out of the box (its enable_selinux option
+    # breaks kubeadm on FCOS because FCOS lacks the Kubernetes-
+    # specific SELinux policy modules that RHCOS ships). Without
+    # labeling, privileged containers can't chroot into the host
+    # rootfs. Permissive mode is acceptable for test VMs.
     - name: selinux-permissive.service
       enabled: true
       contents: |
