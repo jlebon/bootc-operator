@@ -25,8 +25,12 @@ dump_debug() {
     echo "=== DEBUG: cluster state ==="
     echo "--- Nodes ---"
     kubectl get nodes -o wide 2>/dev/null || true
-    echo "--- Pods in ${NAMESPACE} ---"
-    kubectl -n "${NAMESPACE}" get pods -o wide 2>/dev/null || true
+    echo "--- All resources in ${NAMESPACE} ---"
+    kubectl -n "${NAMESPACE}" get all -o wide 2>/dev/null || true
+    echo "--- Deployment describe ---"
+    kubectl -n "${NAMESPACE}" describe deployment bootc-operator-controller-manager 2>/dev/null || true
+    echo "--- ReplicaSets ---"
+    kubectl -n "${NAMESPACE}" get replicasets -o wide 2>/dev/null || true
     echo "--- Events in ${NAMESPACE} ---"
     kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp 2>/dev/null | tail -30 || true
     echo "--- Operator pod describe ---"
@@ -83,7 +87,7 @@ ctr -n k8s.io images import "${ARTIFACTS}/daemon.tar"
 
 # Step 2: Deploy the operator
 echo "=== Deploying operator ==="
-kubectl apply -f "${ARTIFACTS}/install.yaml"
+kubectl apply -f "${ARTIFACTS}/install.yaml" 2>&1 | tee /dev/stderr | tail -5
 
 # Step 3: Wait for operator deployment to be ready
 wait_for "operator deployment" \
