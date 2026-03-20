@@ -16,7 +16,7 @@
 set -xeuo pipefail
 
 ARTIFACTS=/mnt/.artifacts
-NAMESPACE=bootc-operator-system
+NAMESPACE=bootc-operator
 POOL_NAME=test-pool
 
 # --- Helpers ---
