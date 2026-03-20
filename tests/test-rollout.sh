@@ -21,6 +21,33 @@ POOL_NAME=test-pool
 
 # --- Helpers ---
 
+dump_debug() {
+    echo "=== DEBUG: cluster state ==="
+    echo "--- Nodes ---"
+    kubectl get nodes -o wide 2>/dev/null || true
+    echo "--- Pods in ${NAMESPACE} ---"
+    kubectl -n "${NAMESPACE}" get pods -o wide 2>/dev/null || true
+    echo "--- Events in ${NAMESPACE} ---"
+    kubectl -n "${NAMESPACE}" get events --sort-by=.lastTimestamp 2>/dev/null | tail -30 || true
+    echo "--- Operator pod describe ---"
+    kubectl -n "${NAMESPACE}" describe pods -l control-plane=controller-manager 2>/dev/null || true
+    echo "--- Operator logs ---"
+    kubectl -n "${NAMESPACE}" logs -l control-plane=controller-manager --tail=50 2>/dev/null || true
+    echo "--- Daemon pods describe ---"
+    kubectl -n "${NAMESPACE}" describe pods -l app.kubernetes.io/name=bootc-daemon 2>/dev/null || true
+    echo "--- Daemon logs ---"
+    kubectl -n "${NAMESPACE}" logs -l app.kubernetes.io/name=bootc-daemon --tail=50 2>/dev/null || true
+    echo "--- BootcNodePools ---"
+    kubectl get bootcnodepools -o yaml 2>/dev/null || true
+    echo "--- BootcNodes ---"
+    kubectl get bootcnodes -o yaml 2>/dev/null || true
+    echo "--- Container images ---"
+    ctr -n k8s.io images list 2>/dev/null | grep -E 'bootc|REF' || true
+    echo "=== END DEBUG ==="
+}
+
+trap 'if [[ $? -ne 0 ]]; then dump_debug; fi' EXIT
+
 wait_for() {
     local description="$1"
     local check_cmd="$2"
