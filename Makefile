@@ -96,6 +96,7 @@ cleanup-test-e2e: ## Tear down the Kind cluster used for e2e tests
 test-artifacts: ## Build container images and test artifacts for VM-based e2e tests.
 	$(CONTAINER_TOOL) build --target operator -t $(TEST_IMG) .
 	$(CONTAINER_TOOL) build --target daemon -t $(TEST_DAEMON_IMG) .
+	rm -rf tests/.artifacts
 	mkdir -p tests/.artifacts
 	$(CONTAINER_TOOL) save -o tests/.artifacts/operator.tar $(TEST_IMG)
 	$(CONTAINER_TOOL) save -o tests/.artifacts/daemon.tar $(TEST_DAEMON_IMG)
