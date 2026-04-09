@@ -1,0 +1,23 @@
+FROM quay.io/fedora/fedora:43
+
+RUN dnf install -y \
+	libvirt-client \
+	libvirt-daemon \
+	libvirt-daemon-driver-qemu \
+	libvirt-daemon-driver-storage-core \
+	libvirt-daemon-driver-network \
+	qemu-kvm \
+	virt-install \
+	virtiofsd \
+	iputils \
+	bind9-next-utils \
+	openssh-clients \
+	genisoimage \
+	&& dnf clean all
+
+COPY qemu.conf /etc/libvirt/qemu.conf
+COPY virtqemud.conf /etc/libvirt/virtqemud.conf
+COPY entrypoint.sh /entrypoint.sh
+
+RUN mkdir -p /home/qemu && chown -R qemu:qemu /home/qemu
+ENTRYPOINT ["/entrypoint.sh"]

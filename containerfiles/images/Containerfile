@@ -1,0 +1,6 @@
+FROM quay.io/fedora/fedora-bootc as root
+
+RUN dnf install -y kubernetes kubernetes1.35-kubeadm openssh-server qemu-guest-agent bind-utils iputils cloud-init && dnf clean all
+RUN passwd -d root
+
+RUN sed -i 's|"/opt/cni/bin"|"/var/lib/cni/bin"|g' /etc/crio/crio.conf
