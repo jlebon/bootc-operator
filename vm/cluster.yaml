@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: cluster
+  labels:
+    app: cluster
+spec:
+  securityContext:
+    seLinuxOptions:
+      type: spc_t
+
+  containers:
+  - name: cluster
+    image: localhost/cluster:latest
+    securityContext:
+      privileged: true
+    ports:
+    - containerPort: 22
+      hostPort: 2222
+      protocol: TCP
+    - containerPort: 6443
+      hostPort: 6443
+      protocol: TCP
+    volumeMounts:
+    - name: images
+      mountPath: /src
+    - name: libvirt-socket
+      mountPath: /run/libvirt
+    - name: dev-kvm
+      mountPath: /dev/kvm
+    - name: dev-fuse
+      mountPath: /dev/fuse
+    - name: dev-hugepages
+      mountPath: /dev/hugepages
+    - name: cluster-keys
+      mountPath: /var/run/cluster
+
+  volumes:
+  - name: images
+    hostPath:
+      path: ./vm/images
+      type: DirectoryOrCreate
+  - name: libvirt-socket
+    emptyDir: {}
+  - name: dev-kvm
+    hostPath:
+      path: /dev/kvm
+      type: CharDevice
+  - name: dev-fuse
+    hostPath:
+      path: /dev/fuse
+      type: CharDevice
+  - name: dev-hugepages
+    hostPath:
+      path: /dev/hugepages
+      type: Directory
+  - name: cluster-keys
+    hostPath:
+      path: ./vm/cluster-keys
+      type: DirectoryOrCreate
+
+  restartPolicy: Always
