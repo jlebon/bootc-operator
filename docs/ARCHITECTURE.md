@@ -23,7 +23,7 @@ Two binaries: a **controller** (Deployment) and a **daemon** (DaemonSet).
 │  │                     │     │                        │  │
 │  │ spec:               │     │ spec:   ← controller   │  │
 │  │   nodeSelector      │     │   desiredImage         │  │
-│  │   image (tag/digest)│     │   rebootApproved       │  │
+│  │   image (tag/digest)│     │   desiredImageState    │  │
 │  │   rollout config    │     │                        │  │
 │  │   update policy     │     │ status: ← daemon       │  │
 │  │                     │     │   booted image/digest  │  │
@@ -38,7 +38,7 @@ Two binaries: a **controller** (Deployment) and a **daemon** (DaemonSet).
 │  │                                                    │  │
 │  │  Pool Reconciler: resolves tags, selects nodes,    │  │
 │  │    computes candidates, writes BootcNode.spec,     │  │
-│  │    handles drain/cordon/uncordon/reboot approval,  │  │
+│  │    handles drain/cordon/uncordon,                  │  │
 │  │    polls registries for tag updates                │  │
 │  └────────────────────────────────────────────────────┘  │
 │                                                          │
@@ -54,7 +54,7 @@ Two binaries: a **controller** (Deployment) and a **daemon** (DaemonSet).
 │  │                                                  │    │
 │  │  On spec change:                                 │    │
 │  │    if desiredImage != booted → bootc switch      │    │
-│  │    if staged && rebootApproved → reboot          │    │
+│  │    if desiredImageState == Booted → reboot       │    │
 │  │                                                  │    │
 │  │  On bootc status change:                         │    │
 │  │    (via fsnotify on /proc/1/root/ostree/bootc)   │    │
@@ -82,7 +82,7 @@ object**: its own BootcNode CRD (field-selected by node name). This is the sole
 communication channel:
 
 - **Controller → Daemon**: writes to `BootcNode.spec` (desired image,
-  reboot approval)
+  desired image state)
 - **Daemon → Controller**: writes to `BootcNode.status` (bootc state,
   conditions)
 
@@ -169,7 +169,7 @@ metadata:
     - kind: BootcNodePool  # owned by pool
 spec:                       # ← written by controller
   desiredImage: quay.io/example/myos@sha256:abc123
-  rebootApproved: false
+  desiredImageState: Staged  # Staged or Booted
   pullSecretRef:
     name: my-pull-secret
     namespace: bootc-operator
@@ -194,7 +194,7 @@ status:                     # ← written by daemon
     - type: Idle
       status: "False"
       reason: Staged
-      message: "Image staged, awaiting reboot approval"
+      message: "Image staged, awaiting desiredImageState: Booted"
 ```
 
 The `Idle` condition reports whether the daemon is actively doing work.
@@ -202,13 +202,13 @@ It does **not** claim whether the node is "up to date" -- that is
 determined by the controller by comparing `spec.desiredImage` against
 `status.booted.imageDigest`.
 
-| Status | Reason        | Meaning                                   |
-|--------|---------------|-------------------------------------------|
-| True   | Idle          | Daemon has no active update cycle         |
-| False  | Staging       | Pulling/staging the image                 |
-| False  | Staged        | Image staged, waiting for reboot approval |
-| False  | Rebooting     | Reboot in progress                        |
-| False  | StagingFailed | Something went wrong during staging       |
+| Status | Reason        | Meaning                                             |
+|--------|---------------|-----------------------------------------------------|
+| True   | Idle          | Daemon has no active update cycle                   |
+| False  | Staging       | Pulling/staging the image                           |
+| False  | Staged        | Image staged, waiting for desiredImageState: Booted |
+| False  | Rebooting     | Reboot in progress                                  |
+| False  | StagingFailed | Something went wrong during staging                 |
 
 ## Daemon Logic
 
@@ -225,7 +225,7 @@ spec (from the controller) and local bootc status.
     │                               ▼        ▼
     │                           Staged   StagingFailed
     │                               │
-    │                      rebootApproved == true
+    │                   desiredImageState == Booted
     │                               │
     │                               │
     │                               ▼
@@ -355,8 +355,9 @@ reboot as soon as `maxUnavailable` capacity allows.
 **3. Drive per-node rollout state machine**
 
 For each BootcNode owned by this pool, read its `status.conditions` and
-act based on the current state. If `spec.rollout.paused` is true, skip
-reboot approval (but let in-progress staging complete).
+act based on the current state. If `spec.rollout.paused` is true, do not
+set `desiredImageState: Booted` on any new nodes (but let in-progress
+staging complete).
 
 The effective state of a BootcNode is determined by three fields:
 
@@ -364,7 +365,10 @@ The effective state of a BootcNode is determined by three fields:
   be running. Kept in sync with the pool's `targetDigest` (updated on
   all BootcNodes when `targetDigest` changes). After a successful
   update, it already matches the booted image -- no clearing needed.
-- `spec.rebootApproved` -- set by the controller after drain completes.
+- `spec.desiredImageState` -- set by the controller. `Staged` means the
+  daemon should stage the image but not reboot. `Booted` means the daemon
+  should apply the staged image and reboot. Set to `Booted` after drain
+  completes.
 - `status.conditions[Idle]` -- set by the daemon to report whether it
   is actively working. The daemon sets `Idle=True` when it has no
   active update cycle, and `Idle=False` with a reason when it does.
@@ -389,9 +393,9 @@ State determination:
 
 The pool has `maxUnavailable` **reboot slots**. A node enters a reboot
 slot when the controller cordons it, drains it, and sets
-`rebootApproved`. The node holds its slot until it reboots into the
-desired image and the controller uncordons it and clears
-`rebootApproved`, freeing the slot for the next candidate.
+`desiredImageState: Booted`. The node holds its slot until it reboots
+into the desired image and the controller uncordons it, freeing the
+slot for the next candidate.
 
 Staging is non-disruptive (image pull only) and does not occupy a
 reboot slot. Neither do Pending and Staged nodes -- they are still
@@ -399,12 +403,12 @@ serving workloads normally.
 
 Error handling depends on the failure type:
 - **Staging errors** (StagingFailed): likely node-specific (disk,
-  network). The rollout continues on other nodes. The pool is marked
-  `Degraded` but reboot approval is not blocked.
+  network). The pool is marked `Degraded` but the rollout continues
+  on other nodes.
 - **Post-reboot errors** (node not Ready beyond timeout): likely
-  image-specific. The rollout is halted -- no further reboots are
-  approved until the error is resolved. Already-rebooting nodes
-  finish, but no new nodes are cordoned.
+  image-specific. The rollout is halted -- no further nodes are set
+  to `desiredImageState: Booted` until the error is resolved.
+  Already-rebooting nodes finish, but no new nodes are cordoned.
 
 The controller and daemon each own specific transitions:
 
@@ -451,7 +455,7 @@ Transition details:
   timeout (~90s). If drain doesn't complete (e.g. a PDB blocks
   eviction), return early and requeue -- the next reconcile will retry.
   On successful drain, the controller sets
-  `BootcNode.spec.rebootApproved = true`. The daemon detects this,
+  `BootcNode.spec.desiredImageState = Booted`. The daemon detects this,
   sets `Idle=False reason=Rebooting`, and reboots.
 
 - **Rebooting → Idle**: The node reboots into the new image. The daemon
@@ -459,14 +463,14 @@ Transition details:
   controller detects that `desiredImage == booted` but keeps the reboot
   slot occupied until the node is Ready. Once Ready, it restores prior
   cordon state (uncordons only if the node was not already
-  unschedulable before), removes the annotation, and clears
-  `rebootApproved`. This frees the reboot slot for the next candidate.
+  unschedulable before) and removes the annotation. This frees the
+  reboot slot for the next candidate.
 
 - **Node not Ready beyond timeout**: The node holds its reboot slot,
   naturally blocking further reboots. If the node does not become Ready
   within a timeout, it is marked degraded. Post-reboot failures are
-  likely image-specific, so the rollout is halted -- no further reboots
-  are approved until the error is resolved.
+  likely image-specific, so the rollout is halted -- no further nodes
+  are set to `desiredImageState: Booted` until the error is resolved.
 
 **4. Aggregate pool status**
 
@@ -492,10 +496,10 @@ All daemons: set Idle=False Reason=Staged (as each finishes)
     │
     ▼
 Pool Reconciler: assigns reboot slot to a Staged node
-  (cordons, drains, sets rebootApproved)
+  (cordons, drains, sets desiredImageState: Booted)
     │
     ▼
-Daemon: detects rebootApproved, reboots
+Daemon: detects desiredImageState: Booted, reboots
     │
     ▼
 Node reboots into new image
@@ -504,21 +508,22 @@ Daemon: restarts, reads bootc status, sets Idle=True
     ▼
 Pool Reconciler: detects desiredImage == booted
 Pool Reconciler: waits for node Ready, then frees reboot slot
-  (uncordons, clears rebootApproved)
+  (uncordons)
 Pool Reconciler: assigns freed slot to next Staged node
 ```
 
 ## Rollback, Pause, Cancel
 
 - **Pause**: User sets `pool.spec.rollout.paused = true`. The Pool
-  Reconciler stops picking new candidates and does not approve reboots.
+  Reconciler stops picking new candidates and does not set
+  `desiredImageState: Booted` on any new nodes.
   Nodes already mid-staging complete their staging. Tag resolution
   continues and `status.targetDigest` is kept current, so the user can
   see what's pending.
 
 - **Resume**: User sets `pool.spec.rollout.paused = false`. The
-  reconciler picks up where it left off: selects candidates, approves
-  reboots for already-staged nodes.
+  reconciler picks up where it left off: selects candidates, sets
+  `desiredImageState: Booted` for already-staged nodes.
 
 - **Cancel + rollback**: User changes `pool.spec.image` back to the
   previous digest. The reconciler updates `targetDigest` and sets
@@ -592,8 +597,9 @@ the operator namespace.
 
 3. **Maintenance windows**: Allow pools to specify time windows during which
    reboots are permitted (e.g. weekends, off-peak hours). Staging would
-   still happen immediately, but the reconciler would gate reboot approval
-   on the current time falling within the window. Similar to kured/Zincati.
+   still happen immediately, but the reconciler would only set
+   `desiredImageState: Booted` when the current time falls within the
+   window. Similar to kured/Zincati.
 
 4. **Pre-staging while paused**: A mode where pausing blocks reboots but
    allows staging to proceed on all target nodes. This way, when the user
