@@ -53,7 +53,7 @@ Two binaries: a **controller** (Deployment) and a **daemon** (DaemonSet).
 │  │  Watches: its own BootcNode (single object)      │    │
 │  │                                                  │    │
 │  │  On spec change:                                 │    │
-│  │    if desiredImage != booted → bootc switch      │    │
+│  │    if desiredImage != booted → stage (locked)    │    │
 │  │    if desiredImageState == Booted → reboot       │    │
 │  │                                                  │    │
 │  │  On bootc status change:                         │    │
@@ -218,7 +218,7 @@ spec (from the controller) and local bootc status.
 ```
             desiredImage != booted
   Idle ────────────────────────────► Staging
-  (True)                             (bootc switch)
+  (True)                             (bootc switch --download-only)
     ▲                                    │
     │                               ok ──┴── error
     │                               │        │
@@ -230,7 +230,7 @@ spec (from the controller) and local bootc status.
     │                               │
     │                               ▼
     │                           Rebooting
-    │                           (bootc --apply)
+    │                           (bootc switch --from-downloaded --apply)
     │                               │
     │                   ... node reboots ...
     │                   daemon restarts
@@ -440,14 +440,16 @@ The controller and daemon each own specific transitions:
 Transition details:
 
 - **Idle → Staging**: The daemon detects that `spec.desiredImage` no longer
-  matches the booted image. It then sets `Idle=False reason=Staging`, and begins
-  staging.
+  matches the booted image. It then sets `Idle=False reason=Staging`, and runs
+  `bootc switch --download-only <desiredImage>` to stage the image in locked
+  mode (the staged image will not be applied on an unexpected reboot).
 
-- **Staging → Staged**: The daemon finishes `bootc switch` successfully and sets
-  `Idle=False reason=Staged`. If `desiredImage` changed during staging, the
-  mismatch is caught in the Staged state (see Staged → Staging below).
+- **Staging → Staged**: The daemon finishes `bootc switch --download-only`
+  successfully and sets `Idle=False reason=Staged`. The staged image is locked
+  and safe from unexpected reboots. If `desiredImage` changed during staging,
+  the mismatch is caught in the Staged state (see Staged → Staging below).
 
-- **Staging → StagingFailed**: The daemon's `bootc switch` failed. Sets
+- **Staging → StagingFailed**: The daemon's `bootc switch --download-only` failed. Sets
   `Idle=False reason=StagingFailed`. The node is marked degraded. Staging errors
   are likely node-specific (disk, network), so the rollout continues on other
   nodes.
@@ -455,7 +457,8 @@ Transition details:
 - **Staged → Staging** (re-stage): If `staged.imageDigest != desiredImage`
   (because `desiredImage` changed while staging or while waiting for a
   reboot slot), the daemon goes back to Staging. It sets `Idle=False
-  reason=Staging` and re-runs `bootc switch` with the new `desiredImage`.
+  reason=Staging` and re-runs `bootc switch --download-only` with the new
+  `desiredImage`.
 
 - **Staged → Rebooting**: The controller assigns the node a reboot
   slot if one is available. It cordons the node and records prior
@@ -465,10 +468,11 @@ Transition details:
   eviction), return early and requeue -- the next reconcile will retry.
   On successful drain, the controller sets
   `BootcNode.spec.desiredImageState = Booted`. The daemon detects this
-  and verifies `staged.imageDigest == desiredImage` before rebooting.
-  If they match, it sets `Idle=False reason=Rebooting` and reboots.
-  If they don't match (race with a `desiredImage` update), the daemon
-  goes back to Staging instead.
+  and verifies `staged.imageDigest == desiredImage` before proceeding.
+  If they match, it sets `Idle=False reason=Rebooting` and runs
+  `bootc switch --from-downloaded --apply` to unlock the staged image
+  and reboot into it. If they don't match (race with a `desiredImage`
+  update), the daemon goes back to Staging instead.
 
 - **Rebooting → Idle**: The node reboots into the new image. The daemon
   pod restarts, reads `bootc status --json`, and sets `Idle=True`. The
@@ -551,9 +555,9 @@ mount namespace.
 | Operator action | bootc invocation | Notes |
 |----------------|-----------------|-------|
 | Read status | `bootc status --json --format-version=1` | Parse Host struct |
-| Stage update | `bootc switch <image>` | Stages for next boot |
-| Apply + reboot | `bootc upgrade --from-downloaded --apply` | Applies staged update and reboots |
-| Apply + soft reboot | `bootc upgrade --from-downloaded --apply --soft-reboot=auto` | Userspace-only restart when possible |
+| Stage update | `bootc switch --download-only <image>` | Stages but locks -- won't apply on unexpected reboot ([pending upstream](https://github.com/bootc-dev/bootc/issues/2137)) |
+| Apply + reboot | `bootc switch --from-downloaded --apply` | Unlocks staged update and reboots |
+| Apply + soft reboot | `bootc switch --from-downloaded --apply --soft-reboot=auto` | Unlocks and does userspace-only restart when possible |
 | React to changes | fsnotify on `/proc/1/root/ostree/bootc` | See below |
 
 ### Detecting bootc status changes
