@@ -78,7 +78,7 @@ manage bootc nodes in the cluster.
 - A developer wants to test their changes to the operator.
     - It should be possible to run e2e tests locally using virtualization.
 
-## Relationship to the Machine Config Operator
+## Relationship to the Machine Config Operator (MCO)
 
 The [MCO] is an operator capable of managing bootc hosts (such as RHEL CoreOS)
 but it is tied to [OpenShift]. It is overall quite powerful but complex. It also
@@ -98,7 +98,7 @@ running on those nodes as a black box. The bootc operator knows nothing about
 provisioning nodes, but knows how to manage the OS once they've joined the
 cluster.
 
-## Relationship to kured
+## Relationship to Kubernetes Reboot Daemon (Kured)
 
 [Kured] is a Kubernetes daemon which handles update rollout and reboot
 coordination. It is minimal and well-scoped. However, for the Bootc Operator, we
@@ -108,8 +108,30 @@ are notable examples. While there is potential for collaboration and code
 sharing, we are focused for now on exploring the problem space when tightening
 the scope to bootc hosts.
 
+## Relationship to Flight Control (flightctl)
+
+[Flight Control] is a fleet management service for edge devices. It primarily
+supports bootc hosts (though non-bootc hosts will also eventually be supported
+in a limited way). There's a lot of similar functionality in both projects,
+especially around rollouts.
+
+Flight Control is capable of running outside Kubernetes (and brings in e.g. an
+API server, PostgresQL, Redis, and a host agent). While it can also be deployed
+to Kubernetes, it's purely for "hosting", and not as an operator. As of this
+writing, there are no plans to adopt an operator pattern, nor to provide deeper
+integration for managing cluster nodes themselves (i.e. the gap Bootc Operator
+fills).
+
+This makes it fundamentally different from what we're building here, and in
+turn makes potential code sharing difficult. More feasible opportunities for
+collaboration include:
+1. sharing at least of e.g. type definitions such as `bootc status --json`
+2. enablement at the bootc host level for APIs of interest to both projects
+3. consistent terminology between similar/identical concepts
+
 [bootc]: https://github.com/bootc-dev/bootc
 [Cluster API]: https://github.com/kubernetes-sigs/cluster-api
+[Flight Control]: https://flightctl.io/
 [Ignition]: https://coreos.github.io/ignition/
 [Kured]: https://kured.dev/
 [MCO]: https://github.com/openshift/machine-config-operator
