@@ -226,7 +226,7 @@ spec (from the controller) and local bootc status.
     │                           Staged   StagingFailed
     │                               │
     │                   desiredImageState == Booted
-    │                               │
+    │                   && staged == desiredImage
     │                               │
     │                               ▼
     │                           Rebooting
@@ -347,7 +347,9 @@ cache. Then reconcile:
 
 Sync each BootcNode's spec fields from the pool: set `desiredImage` to
 `targetDigest`, and copy `pullSecretRef` and `pullSecretHash` (if they
-differ). When `targetDigest` changes, this causes all daemons to begin
+differ). When `desiredImage` changes, also reset `desiredImageState` to
+`Staged` -- this revokes any pending reboot approval for the previous
+image. When `targetDigest` changes, this causes all daemons to begin
 staging in parallel. This is intentional -- staging is non-disruptive
 (image pull only), and pre-staging everywhere means nodes are ready to
 reboot as soon as `maxUnavailable` capacity allows.
@@ -416,8 +418,9 @@ The controller and daemon each own specific transitions:
   ┌────────┐ controller updates  ┌───────────┐ daemon stages ┌──────────┐
   │  Idle  ├────────────────────►│  Staging  ├──────────────►│  Staged  │
   │        │ desiredImage        │           │ successfully  │          │
-  │        │                     │ (daemon   │               │ (waiting │
-  │        │                     │  pulling) │               │ for slot)│
+  │        │                     │ (daemon   │◄──────────────┤ (waiting │
+  │        │                     │  pulling) │ staged !=     │ for slot)│
+  │        │                     │           │ desiredImage  │          │
   └────▲───┘                     └─────┬─────┘               └────┬─────┘
        │                               │                          │
        │                               │ error              slot  │
@@ -441,12 +444,18 @@ Transition details:
   staging.
 
 - **Staging → Staged**: The daemon finishes `bootc switch` successfully and sets
-  `Idle=False reason=Staged`.
+  `Idle=False reason=Staged`. If `desiredImage` changed during staging, the
+  mismatch is caught in the Staged state (see Staged → Staging below).
 
 - **Staging → StagingFailed**: The daemon's `bootc switch` failed. Sets
   `Idle=False reason=StagingFailed`. The node is marked degraded. Staging errors
   are likely node-specific (disk, network), so the rollout continues on other
   nodes.
+
+- **Staged → Staging** (re-stage): If `staged.imageDigest != desiredImage`
+  (because `desiredImage` changed while staging or while waiting for a
+  reboot slot), the daemon goes back to Staging. It sets `Idle=False
+  reason=Staging` and re-runs `bootc switch` with the new `desiredImage`.
 
 - **Staged → Rebooting**: The controller assigns the node a reboot
   slot if one is available. It cordons the node and records prior
@@ -455,8 +464,11 @@ Transition details:
   timeout (~90s). If drain doesn't complete (e.g. a PDB blocks
   eviction), return early and requeue -- the next reconcile will retry.
   On successful drain, the controller sets
-  `BootcNode.spec.desiredImageState = Booted`. The daemon detects this,
-  sets `Idle=False reason=Rebooting`, and reboots.
+  `BootcNode.spec.desiredImageState = Booted`. The daemon detects this
+  and verifies `staged.imageDigest == desiredImage` before rebooting.
+  If they match, it sets `Idle=False reason=Rebooting` and reboots.
+  If they don't match (race with a `desiredImage` update), the daemon
+  goes back to Staging instead.
 
 - **Rebooting → Idle**: The node reboots into the new image. The daemon
   pod restarts, reads `bootc status --json`, and sets `Idle=True`. The
