@@ -8,9 +8,15 @@ it a great fit for K8s nodes. Additionally, bootc is distro-agnostic, which
 means that it has potential for broad usage in the K8s ecosystem as a host OS.
 
 The missing piece is an operator which bridges bootc and K8s. This is the Bootc
-Operator. Its goal is to tightly integrate with bootc and to surface its state
-and capabilities to the K8s control plane to make it easier to monitor and
-manage bootc nodes in the cluster.
+Operator. Its primary goal is to bring bootc host management to the control
+plane and make it accessible to cluster admins in a K8s-native way (i.e. via
+declarative CRDs).
+
+A subgoal of this is to prioritize and push forward bootc host level features
+relevant to the cluster use case in order to tap into the full potential of what
+the bootc model has to offer to K8s. Things like config overlays, sysexts, live
+apply, etc. These are all equally relevant outside of K8s of course and thus
+strengthen the broader bootc story.
 
 ## User Stories
 
