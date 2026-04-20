@@ -1,0 +1,1 @@
+../../../.agents/skills/k8s-api-review/SKILL.md
