@@ -1,0 +1,9 @@
+apiVersion: bootc.dev/v1alpha1
+kind: BootcNode
+metadata:
+  labels:
+    app.kubernetes.io/name: workspace
+    app.kubernetes.io/managed-by: kustomize
+  name: bootcnode-sample
+spec:
+  # TODO(user): Add fields here
