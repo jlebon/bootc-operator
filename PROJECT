@@ -8,4 +8,18 @@ layout:
 - go.kubebuilder.io/v4
 projectName: workspace
 repo: github.com/jlebon/bootc-operator
+resources:
+- api:
+    crdVersion: v1
+  controller: true
+  domain: bootc.dev
+  kind: BootcNodePool
+  path: github.com/jlebon/bootc-operator/api/v1alpha1
+  version: v1alpha1
+- api:
+    crdVersion: v1
+  domain: bootc.dev
+  kind: BootcNode
+  path: github.com/jlebon/bootc-operator/api/v1alpha1
+  version: v1alpha1
 version: "3"
