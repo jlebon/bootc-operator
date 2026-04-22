@@ -22,9 +22,20 @@ For architectural details (CRD schemas, state machines, reconciliation loops, da
 
 ### Validation
 
-- [ ] Build the operator and daemon container images.
-- [ ] Deploy the operator and daemon to a cluster. Verify the pods start and report healthy (readiness/liveness probes pass).
-- [ ] Apply the generated CRDs to a cluster. Verify both `bootcnodes.bootc.dev` and `bootcnodepools.bootc.dev` appear in `kubectl get crds`.
+All validation is performed against the bink development cluster. To run
+kubectl commands on the bink cluster:
+
+```bash
+podman exec k8s-podman-node1 ssh -i /run/cluster/cluster.key \
+  -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+  -p 2222 core@localhost \
+  "sudo kubectl --kubeconfig=/etc/kubernetes/admin.conf <cmd>"
+```
+
+- [ ] Build the operator and daemon container images on the host with `make docker-build`.
+- [ ] Load the images into the bink cluster VM: `podman save <image> | podman exec -i k8s-podman-node1 ssh -i /run/cluster/cluster.key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p 2222 core@localhost "sudo podman load"`.
+- [ ] Apply the generated CRDs to the bink cluster. Verify both `bootcnodes.bootc.dev` and `bootcnodepools.bootc.dev` appear in `kubectl get crds`.
+- [ ] Deploy the operator and daemon to the bink cluster. Verify the pods start and report healthy (readiness/liveness probes pass) with `kubectl -n bootc-operator get pods`.
 - [ ] Create a valid BootcNodePool resource with all required fields. Verify it is accepted.
 - [ ] Create a BootcNodePool missing the required `image` field. Verify the API server rejects it.
 - [ ] Inspect a created BootcNodePool and confirm default values are applied: `maxUnavailable=1`, `rebootPolicy=Auto`, `healthCheck.timeout=5m`.
