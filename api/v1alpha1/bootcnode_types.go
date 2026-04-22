@@ -20,38 +20,25 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// BootcNodeSpec defines the desired state of BootcNode
 type BootcNodeSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of BootcNode. Edit bootcnode_types.go to remove/update
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	DesiredImage string `json:"desiredImage"`
+	// +kubebuilder:default=Staged
+	DesiredImageState DesiredImageState `json:"desiredImageState,omitempty"`
 	// +optional
-	Foo *string `json:"foo,omitempty"`
+	PullSecretRef *ImagePullSecretReference `json:"pullSecretRef,omitempty"`
+	// +optional
+	PullSecretHash string `json:"pullSecretHash,omitempty"`
 }
 
-// BootcNodeStatus defines the observed state of BootcNode.
 type BootcNodeStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the BootcNode resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	// +optional
+	Booted *BootEntryStatus `json:"booted,omitempty"`
+	// +optional
+	Staged *BootEntryStatus `json:"staged,omitempty"`
+	// +optional
+	Rollback *BootEntryStatus `json:"rollback,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -61,27 +48,26 @@ type BootcNodeStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Desired Image",type=string,JSONPath=`.spec.desiredImage`
+// +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.spec.desiredImageState`
+// +kubebuilder:printcolumn:name="Booted",type=string,JSONPath=`.status.booted.imageDigest`,priority=1
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// BootcNode is the Schema for the bootcnodes API
 type BootcNode struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of BootcNode
 	// +required
 	Spec BootcNodeSpec `json:"spec"`
 
-	// status defines the observed state of BootcNode
 	// +optional
 	Status BootcNodeStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// BootcNodeList contains a list of BootcNode
 type BootcNodeList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`

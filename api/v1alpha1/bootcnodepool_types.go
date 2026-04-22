@@ -20,38 +20,33 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
-// NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
-
-// BootcNodePoolSpec defines the desired state of BootcNodePool
-type BootcNodePoolSpec struct {
-	// INSERT ADDITIONAL SPEC FIELDS - desired state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-	// The following markers will use OpenAPI v3 schema to validate the value
-	// More info: https://book.kubebuilder.io/reference/markers/crd-validation.html
-
-	// foo is an example field of BootcNodePool. Edit bootcnodepool_types.go to remove/update
-	// +optional
-	Foo *string `json:"foo,omitempty"`
+type ImageSpec struct {
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	Ref string `json:"ref"`
 }
 
-// BootcNodePoolStatus defines the observed state of BootcNodePool.
+type BootcNodePoolSpec struct {
+	// +kubebuilder:validation:Required
+	NodeSelector *metav1.LabelSelector `json:"nodeSelector"`
+	// +kubebuilder:validation:Required
+	Image ImageSpec `json:"image"`
+	// +optional
+	Rollout RolloutConfig `json:"rollout,omitempty"`
+	// +optional
+	Disruption DisruptionConfig `json:"disruption,omitempty"`
+	// +optional
+	PullSecretRef *ImagePullSecretReference `json:"pullSecretRef,omitempty"`
+}
+
 type BootcNodePoolStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
-
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-
-	// conditions represent the current state of the BootcNodePool resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
-	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
-	//
-	// The status of each condition is one of True, False, or Unknown.
+	DeployedDigest  string `json:"deployedDigest,omitempty"`
+	TargetDigest    string `json:"targetDigest,omitempty"`
+	UpdateAvailable bool   `json:"updateAvailable,omitempty"`
+	NodeCount       int32  `json:"nodeCount,omitempty"`
+	UpdatedCount    int32  `json:"updatedCount,omitempty"`
+	UpdatingCount   int32  `json:"updatingCount,omitempty"`
+	DegradedCount   int32  `json:"degradedCount,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	// +optional
@@ -61,27 +56,29 @@ type BootcNodePoolStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster
+// +kubebuilder:printcolumn:name="Image",type=string,JSONPath=`.spec.image.ref`
+// +kubebuilder:printcolumn:name="Target",type=string,JSONPath=`.status.targetDigest`,priority=1
+// +kubebuilder:printcolumn:name="Nodes",type=integer,JSONPath=`.status.nodeCount`
+// +kubebuilder:printcolumn:name="Updated",type=integer,JSONPath=`.status.updatedCount`
+// +kubebuilder:printcolumn:name="Updating",type=integer,JSONPath=`.status.updatingCount`
+// +kubebuilder:printcolumn:name="Degraded",type=integer,JSONPath=`.status.degradedCount`
+// +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 
-// BootcNodePool is the Schema for the bootcnodepools API
 type BootcNodePool struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// metadata is a standard object metadata
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitzero"`
 
-	// spec defines the desired state of BootcNodePool
 	// +required
 	Spec BootcNodePoolSpec `json:"spec"`
 
-	// status defines the observed state of BootcNodePool
 	// +optional
 	Status BootcNodePoolStatus `json:"status,omitzero"`
 }
 
 // +kubebuilder:object:root=true
 
-// BootcNodePoolList contains a list of BootcNodePool
 type BootcNodePoolList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitzero"`
