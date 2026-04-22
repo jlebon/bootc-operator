@@ -10,14 +10,26 @@ For architectural details (CRD schemas, state machines, reconciliation loops, da
 
 ### Steps
 
-- [ ] Initialize the project with Kubebuilder using domain `bootc.dev`.
+#### Commit 1: "Initialize project with Kubebuilder"
+- [ ] Run `kubebuilder init --domain bootc.dev --repo github.com/jlebon/bootc-operator`.
+
+#### Commit 2: "Scaffold BootcNodePool and BootcNode APIs"
 - [ ] Scaffold the BootcNodePool API (group `bootc.dev`, version `v1alpha1`, kind `BootcNodePool`). Mark it cluster-scoped.
 - [ ] Scaffold the BootcNode API (group `bootc.dev`, version `v1alpha1`, kind `BootcNode`). Mark it cluster-scoped.
+
+#### Commit 3: "Define CRD types and generate manifests"
 - [ ] Define the BootcNodePool spec and status types as specified in ARCHITECTURE.md. Add kubebuilder markers for validation, defaults, enums, and print columns.
 - [ ] Define the BootcNode spec and status types as specified in ARCHITECTURE.md. Add kubebuilder markers for validation, enums, and print columns.
 - [ ] Define shared types: `RebootPolicy` enum, `ImagePullSecretReference`, `RolloutConfig`, `DisruptionConfig`, `HealthCheckConfig`, `BootEntryStatus`.
 - [ ] Run `make manifests generate` to produce CRD YAML and DeepCopy methods.
-- [ ] Set up the two-binary layout: `cmd/operator/main.go` (controller-runtime manager) and `cmd/daemon/main.go` (standalone poll-based agent).
+
+#### Commit 4: "Add operator binary entrypoint"
+- [ ] Set up `cmd/operator/main.go` (controller-runtime manager).
+
+#### Commit 5: "Add daemon binary entrypoint"
+- [ ] Set up `cmd/daemon/main.go` (standalone poll-based agent).
+
+#### Commit 6: "Add multi-stage Dockerfile"
 - [ ] Create the Dockerfile with a multi-stage build that produces both binaries.
 
 ### Validation
