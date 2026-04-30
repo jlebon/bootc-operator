@@ -1,0 +1,5 @@
+## Append samples of your project ##
+resources:
+- bootc_v1alpha1_bootcnodepool.yaml
+- bootc_v1alpha1_bootcnode.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples
