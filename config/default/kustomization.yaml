@@ -1,0 +1,7 @@
+namespace: bootc-operator-system
+namePrefix: bootc-operator-
+
+resources:
+- ../crd
+- ../rbac
+- ../manager
