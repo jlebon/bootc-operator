@@ -96,7 +96,7 @@ periodic heartbeats).
 Defines a group of nodes and their desired OS image state.
 
 ```yaml
-apiVersion: bootc.dev/v1alpha1
+apiVersion: node.bootc.dev/v1alpha1
 kind: BootcNodePool
 metadata:
   name: workers
@@ -161,7 +161,7 @@ Per-node object auto-created by the controller. Named after the Node it
 represents. The controller writes `spec`, the daemon writes `status`.
 
 ```yaml
-apiVersion: bootc.dev/v1alpha1
+apiVersion: node.bootc.dev/v1alpha1
 kind: BootcNode
 metadata:
   name: worker-1           # matches Node name

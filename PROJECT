@@ -14,7 +14,7 @@ resources:
     namespaced: true
   controller: true
   domain: bootc.dev
-  group: bootc
+  group: node
   kind: BootcNodePool
   path: github.com/jlebon/bootc-operator/api/v1alpha1
   version: v1alpha1
@@ -22,7 +22,7 @@ resources:
     crdVersion: v1
     namespaced: true
   domain: bootc.dev
-  group: bootc
+  group: node
   kind: BootcNode
   path: github.com/jlebon/bootc-operator/api/v1alpha1
   version: v1alpha1
