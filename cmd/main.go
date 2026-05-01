@@ -60,7 +60,7 @@ func main() {
 		Scheme:                 scheme,
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "61963fb3.bootc.dev",
+		LeaderElectionID:       "bootc-operator.bootc.dev",
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
