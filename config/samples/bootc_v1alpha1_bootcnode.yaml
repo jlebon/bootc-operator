@@ -1,4 +1,4 @@
-apiVersion: bootc.bootc.dev/v1alpha1
+apiVersion: node.bootc.dev/v1alpha1
 kind: BootcNode
 metadata:
   labels:

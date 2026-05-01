@@ -4,20 +4,20 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.20.1
-  name: bootcnodes.bootc.bootc.dev
+  name: bootcnodepools.node.bootc.dev
 spec:
-  group: bootc.bootc.dev
+  group: node.bootc.dev
   names:
-    kind: BootcNode
-    listKind: BootcNodeList
-    plural: bootcnodes
-    singular: bootcnode
+    kind: BootcNodePool
+    listKind: BootcNodePoolList
+    plural: bootcnodepools
+    singular: bootcnodepool
   scope: Namespaced
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: BootcNode is the Schema for the bootcnodes API
+        description: BootcNodePool is the Schema for the bootcnodepools API
         properties:
           apiVersion:
             description: |-
@@ -37,19 +37,19 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of BootcNode
+            description: spec defines the desired state of BootcNodePool
             properties:
               foo:
-                description: foo is an example field of BootcNode. Edit bootcnode_types.go
+                description: foo is an example field of BootcNodePool. Edit bootcnodepool_types.go
                   to remove/update
                 type: string
             type: object
           status:
-            description: status defines the observed state of BootcNode
+            description: status defines the observed state of BootcNodePool
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the BootcNode resource.
+                  conditions represent the current state of the BootcNodePool resource.
                   Each condition has a unique type and reflects the status of a specific aspect of the resource.
 
                   Standard condition types include:
