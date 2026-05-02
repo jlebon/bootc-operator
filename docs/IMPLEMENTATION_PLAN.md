@@ -44,7 +44,7 @@ BootcNode.
 - Node condition type/reason constants (`Idle` with its reasons)
 - `DesiredImageState` enum type (`Staged`, `Booted`)
 
-### Validation
+### Validation ✅
 
 - envtest: verify CRDs load, objects can be created/retrieved with full
   spec and status, and enum validation rejects invalid values.
