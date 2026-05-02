@@ -34,7 +34,7 @@ BootcNode.
 - Pool condition type/reason constants (`UpToDate`, `Degraded` with
   all their reasons)
 
-### 1c. BootcNode types
+### 1c. BootcNode types ✅
 
 - Add `+kubebuilder:resource:scope=Cluster` marker
 - Flesh out `BootcNodeSpec` (desiredImage, desiredImageState,

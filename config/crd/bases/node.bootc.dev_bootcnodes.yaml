@@ -12,12 +12,16 @@ spec:
     listKind: BootcNodeList
     plural: bootcnodes
     singular: bootcnode
-  scope: Namespaced
+  scope: Cluster
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: BootcNode is the Schema for the bootcnodes API
+        description: |-
+          BootcNode represents a single node managed by the bootc operator.
+          BootcNode objects are auto-created by the controller (one per managed
+          node) and named after the Node they represent. The controller writes
+          spec, the daemon writes status.
         properties:
           apiVersion:
             description: |-
@@ -37,27 +41,96 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of BootcNode
+            description: spec defines the desired state, written by the controller.
             properties:
-              foo:
-                description: foo is an example field of BootcNode. Edit bootcnode_types.go
-                  to remove/update
+              desiredImage:
+                description: |-
+                  desiredImage is the image the node should be running, specified
+                  as a pullspec with digest (e.g.
+                  "quay.io/example/myos@sha256:abc123"). Set by the controller
+                  from the owning pool's targetDigest.
+                minLength: 1
                 type: string
+              desiredImageState:
+                description: |-
+                  desiredImageState is the target state the daemon should drive
+                  the node toward. "Staged" means stage the image but do not
+                  reboot. "Booted" means apply the staged image and reboot.
+                enum:
+                - Staged
+                - Booted
+                type: string
+              pullSecretHash:
+                description: |-
+                  pullSecretHash is a hash of the pull secret's content, used to
+                  detect changes. When this value changes, the daemon re-fetches
+                  the secret and updates the host filesystem.
+                type: string
+              pullSecretRef:
+                description: |-
+                  pullSecretRef references a Secret containing image pull
+                  credentials. Copied from the owning pool's spec.
+                properties:
+                  name:
+                    description: name is the name of the Secret.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: namespace is the namespace of the Secret.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+            required:
+            - desiredImage
+            - desiredImageState
             type: object
           status:
-            description: status defines the observed state of BootcNode
+            description: status defines the observed state, written by the daemon.
             properties:
+              booted:
+                description: booted describes the currently booted OS image.
+                properties:
+                  architecture:
+                    description: |-
+                      architecture is the hardware architecture of the image
+                      (e.g. "amd64").
+                    type: string
+                  image:
+                    description: |-
+                      image is the full image pullspec (e.g.
+                      "quay.io/example/myos@sha256:abc123").
+                    type: string
+                  imageDigest:
+                    description: imageDigest is the image digest (e.g. "sha256:abc123").
+                    type: string
+                  incompatible:
+                    description: |-
+                      incompatible is true if the boot entry has local mutations that
+                      bootc cannot manage (e.g. package layering via rpm-ostree).
+                    type: boolean
+                  softRebootCapable:
+                    description: |-
+                      softRebootCapable is true if this boot entry supports a
+                      userspace-only restart relative to the currently booted system.
+                    type: boolean
+                  timestamp:
+                    description: timestamp is the image build timestamp, if any.
+                    format: date-time
+                    type: string
+                  version:
+                    description: version is the image version string, if any.
+                    type: string
+                required:
+                - image
+                - imageDigest
+                type: object
               conditions:
                 description: |-
-                  conditions represent the current state of the BootcNode resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                  conditions represent the daemon's current state.
+                  The sole condition type is "Idle".
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +189,90 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  observedGeneration is the most recent generation observed by the
+                  daemon. It corresponds to the BootcNode's metadata.generation
+                  which is updated on spec mutations.
+                format: int64
+                type: integer
+              rollback:
+                description: |-
+                  rollback describes the previous OS image available for rollback,
+                  if any.
+                properties:
+                  architecture:
+                    description: |-
+                      architecture is the hardware architecture of the image
+                      (e.g. "amd64").
+                    type: string
+                  image:
+                    description: |-
+                      image is the full image pullspec (e.g.
+                      "quay.io/example/myos@sha256:abc123").
+                    type: string
+                  imageDigest:
+                    description: imageDigest is the image digest (e.g. "sha256:abc123").
+                    type: string
+                  incompatible:
+                    description: |-
+                      incompatible is true if the boot entry has local mutations that
+                      bootc cannot manage (e.g. package layering via rpm-ostree).
+                    type: boolean
+                  softRebootCapable:
+                    description: |-
+                      softRebootCapable is true if this boot entry supports a
+                      userspace-only restart relative to the currently booted system.
+                    type: boolean
+                  timestamp:
+                    description: timestamp is the image build timestamp, if any.
+                    format: date-time
+                    type: string
+                  version:
+                    description: version is the image version string, if any.
+                    type: string
+                required:
+                - image
+                - imageDigest
+                type: object
+              staged:
+                description: staged describes the OS image staged for the next boot,
+                  if any.
+                properties:
+                  architecture:
+                    description: |-
+                      architecture is the hardware architecture of the image
+                      (e.g. "amd64").
+                    type: string
+                  image:
+                    description: |-
+                      image is the full image pullspec (e.g.
+                      "quay.io/example/myos@sha256:abc123").
+                    type: string
+                  imageDigest:
+                    description: imageDigest is the image digest (e.g. "sha256:abc123").
+                    type: string
+                  incompatible:
+                    description: |-
+                      incompatible is true if the boot entry has local mutations that
+                      bootc cannot manage (e.g. package layering via rpm-ostree).
+                    type: boolean
+                  softRebootCapable:
+                    description: |-
+                      softRebootCapable is true if this boot entry supports a
+                      userspace-only restart relative to the currently booted system.
+                    type: boolean
+                  timestamp:
+                    description: timestamp is the image build timestamp, if any.
+                    format: date-time
+                    type: string
+                  version:
+                    description: version is the image version string, if any.
+                    type: string
+                required:
+                - image
+                - imageDigest
+                type: object
             type: object
         required:
         - spec
