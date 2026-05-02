@@ -24,7 +24,7 @@ there. BootcNode gets `--controller=false` because the daemon is a
 separate binary and the Pool Reconciler adds its own watch on
 BootcNode.
 
-### 1b. BootcNodePool types
+### 1b. BootcNodePool types ✅
 
 - Add `+kubebuilder:resource:scope=Cluster` marker
 - Flesh out `BootcNodePoolSpec` (nodeSelector, image, rollout,
