@@ -7,7 +7,7 @@ VMs with a local registry).
 
 ## Milestone 1: Project Bootstrap & CRD Types
 
-### 1a. Project scaffold
+### 1a. Project scaffold ✅
 
 Use kubebuilder to generate the initial project structure:
 
