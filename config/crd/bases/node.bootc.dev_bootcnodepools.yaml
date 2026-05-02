@@ -12,12 +12,15 @@ spec:
     listKind: BootcNodePoolList
     plural: bootcnodepools
     singular: bootcnodepool
-  scope: Namespaced
+  scope: Cluster
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: BootcNodePool is the Schema for the bootcnodepools API
+        description: |-
+          BootcNodePool defines a group of nodes and their desired OS image state.
+          Users create BootcNodePool resources to register nodes with the bootc
+          operator and specify what image they should be running.
         properties:
           apiVersion:
             description: |-
@@ -37,27 +40,134 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of BootcNodePool
+            description: spec defines the desired state of the pool.
             properties:
-              foo:
-                description: foo is an example field of BootcNodePool. Edit bootcnodepool_types.go
-                  to remove/update
-                type: string
+              disruption:
+                description: disruption controls the disruption behavior during updates.
+                properties:
+                  rebootPolicy:
+                    default: RebootOnly
+                    description: |-
+                      rebootPolicy defines how nodes should be rebooted during updates.
+                      "RebootOnly" always performs a full node reboot.
+                      "AllowSoftReboot" performs a userspace-only restart when the
+                      update supports it, falling back to a full reboot otherwise.
+                      Defaults to "RebootOnly".
+                    enum:
+                    - RebootOnly
+                    - AllowSoftReboot
+                    type: string
+                type: object
+              image:
+                description: image defines the desired OS image for nodes in this
+                  pool.
+                properties:
+                  ref:
+                    description: |-
+                      ref is the image reference, either a tag (e.g. "quay.io/example/myos:latest")
+                      or a digest (e.g. "quay.io/example/myos@sha256:abc123").
+                    minLength: 1
+                    type: string
+                required:
+                - ref
+                type: object
+              nodeSelector:
+                description: |-
+                  nodeSelector selects which nodes belong to this pool. Each node can
+                  belong to at most one pool; overlapping selectors cause the
+                  conflicting pools to be marked Degraded with reason NodeConflict.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+              pullSecretRef:
+                description: |-
+                  pullSecretRef references a Secret containing image pull credentials
+                  for the OS image. The operator propagates this secret to managed nodes.
+                properties:
+                  name:
+                    description: name is the name of the Secret.
+                    minLength: 1
+                    type: string
+                  namespace:
+                    description: namespace is the namespace of the Secret.
+                    minLength: 1
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              rollout:
+                description: rollout controls how updates are rolled out across pool
+                  nodes.
+                properties:
+                  maxUnavailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      maxUnavailable is the maximum number of nodes that can be unavailable
+                      during a rolling update. Value can be an absolute number (e.g. 1) or
+                      a percentage of total nodes in the pool (e.g. "25%"). Defaults to 1.
+                    x-kubernetes-int-or-string: true
+                  paused:
+                    description: |-
+                      paused prevents the operator from starting new rollouts. Nodes that
+                      are already mid-staging will complete their staging. Tag resolution
+                      continues and status.targetDigest is kept current.
+                    type: boolean
+                type: object
+            required:
+            - image
+            - nodeSelector
             type: object
           status:
-            description: status defines the observed state of BootcNodePool
+            description: status defines the observed state of the pool.
             properties:
               conditions:
                 description: |-
-                  conditions represent the current state of the BootcNodePool resource.
-                  Each condition has a unique type and reflects the status of a specific aspect of the resource.
-
-                  Standard condition types include:
-                  - "Available": the resource is fully functional
-                  - "Progressing": the resource is being created or updated
-                  - "Degraded": the resource failed to reach or maintain its desired state
-
-                  The status of each condition is one of True, False, or Unknown.
+                  conditions represent the current state of the pool.
+                  Known condition types are "UpToDate" and "Degraded".
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
@@ -116,6 +226,47 @@ spec:
                 x-kubernetes-list-map-keys:
                 - type
                 x-kubernetes-list-type: map
+              degradedCount:
+                description: degradedCount is the number of nodes in a degraded state.
+                format: int32
+                type: integer
+              deployedDigest:
+                description: |-
+                  deployedDigest is the last digest fully rolled out to all nodes in
+                  the pool.
+                type: string
+              nodeCount:
+                description: nodeCount is the total number of nodes in this pool.
+                format: int32
+                type: integer
+              observedGeneration:
+                description: |-
+                  observedGeneration is the most recent generation observed by the
+                  controller. It corresponds to the pool's metadata.generation which
+                  is updated on spec mutations.
+                format: int64
+                type: integer
+              targetDigest:
+                description: |-
+                  targetDigest is the image digest the pool is rolling out to. For
+                  digest refs, this is set directly from spec.image.ref. For tag refs,
+                  this is the resolved digest from the registry.
+                type: string
+              updateAvailable:
+                description: updateAvailable is true when targetDigest differs from
+                  deployedDigest.
+                type: boolean
+              updatedCount:
+                description: updatedCount is the number of nodes running the target
+                  digest.
+                format: int32
+                type: integer
+              updatingCount:
+                description: |-
+                  updatingCount is the number of nodes actively being updated
+                  (staging, staged, or rebooting).
+                format: int32
+                type: integer
             type: object
         required:
         - spec
