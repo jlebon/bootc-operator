@@ -1,4 +1,4 @@
-namespace: bootc-operator-system
+namespace: bootc-operator
 namePrefix: bootc-operator-
 
 resources:
