@@ -590,10 +590,22 @@ controller copies this reference into `BootcNode.spec.pullSecretRef` along
 with a hash of the Secret's content (`spec.pullSecretHash`).
 
 The daemon reads the Secret via the K8s API (one-shot GET, not a watch)
-and writes it to the host filesystem for bootc to use. When the Secret's
-content changes, the controller detects the change and bumps the hash in
-BootcNode.spec. This triggers the daemon's existing BootcNode watch,
-causing it to re-fetch the Secret and update the host file.
+and writes the `.dockerconfigjson` key to `/run/ostree/auth.json` on the
+host filesystem via nsenter. This is the highest-priority path in bootc's
+auth file search order (`/run/ostree/` > `/etc/ostree/` >
+`/usr/lib/ostree/`), so it cleanly overrides any persistent or vendor
+auth config without mutating `/etc/`.
+
+Using a `/run/` path means the file does not survive reboots, but this is
+desirable: the daemon re-writes it on every startup and on every
+BootcNode spec change, so it is always present before any `bootc upgrade`
+runs. If the DaemonSet is removed, the credentials disappear on the next
+reboot rather than lingering on disk.
+
+When the Secret's content changes, the controller detects the change and
+bumps the hash in BootcNode.spec. This triggers the daemon's existing
+BootcNode watch, causing it to re-fetch the Secret and update the host
+file.
 
 This requires the daemon ServiceAccount to have `get` permission on Secrets in
 the operator namespace.
