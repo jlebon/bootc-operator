@@ -36,9 +36,17 @@ fmt: ## Run go fmt against code.
 vet: ## Run go vet against code.
 	go vet ./...
 
-.PHONY: test
-test: manifests generate setup-envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test ./...
+.PHONY: unit
+unit: manifests generate setup-envtest ## Run unit tests (envtest).
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /test/e2e)
+
+.PHONY: e2e
+e2e: manifests generate ## Run e2e tests (requires bink). V=1 for verbose.
+# NB: we `cd` here instead of passing a package path to `go test` so that `-v`
+# actually gives us streaming output (otherwise, it spawns a subprocess for
+# each package, even though we just have one here--but I really like streaming
+# output...).
+	cd test/e2e && go test -timeout 10m -count=1 $(if $(V),-v) .
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter.
