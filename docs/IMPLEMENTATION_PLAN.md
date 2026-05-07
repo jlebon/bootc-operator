@@ -55,7 +55,7 @@ Set up the bink-based e2e test infrastructure used by all subsequent milestones.
 Each e2e test gets its own bink cluster for full isolation and potential for
 parallelization.
 
-### 2a. Harness infrastructure
+### 2a. Harness infrastructure ✅
 
 Create `test/e2e/` with a helper package that provides a single entry
 point:
@@ -84,13 +84,13 @@ memory) and can be extended as needed by later milestones.
 - Builds a controller-runtime client
 - Registers `t.Cleanup` → `bink cluster stop --remove-data`
 
-### 2b. Smoke test
+### 2b. Smoke test ✅
 
 First e2e test: create a BootcNodePool and BootcNode, verify they are
 accepted and retrievable. Validates both the harness and the CRDs on
 a real cluster.
 
-### Validation
+### Validation ✅
 
 - Run the smoke test, verify it passes end-to-end.
 - Verify the cluster is torn down after test completes (including on
