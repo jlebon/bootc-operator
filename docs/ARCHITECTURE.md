@@ -111,7 +111,7 @@ spec:
     maxUnavailable: 1        # int or percentage string (e.g. "25%")
     paused: false            # when true, no new rollouts start
   disruption:
-    rebootPolicy: SoftReboot # SoftReboot, Reboot (default)
+    rebootPolicy: AllowSoftReboot # RebootOnly (default), AllowSoftReboot
   pullSecretRef:
     name: my-pull-secret
     namespace: bootc-operator
