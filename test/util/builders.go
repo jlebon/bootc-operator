@@ -14,36 +14,24 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package controller
+// Package testutil provides shared test helpers for building bootc CRD
+// objects with functional options.
+package testutil
 
 import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	bootcv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
 )
 
-// Test constants for image refs and digests.
-const (
-	testImageTaggedRef = "quay.io/example/myos:latest"
-
-	testDigestA         = "sha256:06f961b802bc46ee168555f066d28f4f0e9afdf3f88174c1ee6f9de004fc30a0" // "A"
-	testDigestB         = "sha256:c0cde77fa8fef97d476c10aad3d2d54fcc2f336140d073651c2dcccf1e379fd6" // "B"
-	testDigestC         = "sha256:12f37a8a84034d3e623d726fe10e5031f4df997ac13f4d5571b5a90c41fb84fe" // "C"
-	testImageDigestRefA = "quay.io/example/myos@" + testDigestA
-	testImageDigestRefB = "quay.io/example/myos@" + testDigestB
-	testImageDigestRefC = "quay.io/example/myos@" + testDigestC
-
-	testSecretName = "my-pull-secret"
-	testSecretNS   = "bootc-operator"
-	testSecretHash = "sha256:b37e50cedcd3e3f1ff64f4afc0422084ae694253cf399326868e07a35f4a45fb" // "secret"
-)
-
-// PoolOption configures a BootcNodePool for testing.
+// PoolOption configures a BootcNodePool.
 type PoolOption func(*bootcv1alpha1.BootcNodePool)
 
-// NewTestPool creates a BootcNodePool with sensible defaults for
-// testing. Override any field via functional options.
-func NewTestPool(name string, opts ...PoolOption) *bootcv1alpha1.BootcNodePool {
+// NewPool creates a BootcNodePool with the given name and image ref.
+// A default worker node selector is applied. Override fields via
+// functional options.
+func NewPool(name, imageRef string, opts ...PoolOption) *bootcv1alpha1.BootcNodePool {
 	pool := &bootcv1alpha1.BootcNodePool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
@@ -55,7 +43,7 @@ func NewTestPool(name string, opts ...PoolOption) *bootcv1alpha1.BootcNodePool {
 				},
 			},
 			Image: bootcv1alpha1.ImageSpec{
-				Ref: testImageTaggedRef,
+				Ref: imageRef,
 			},
 		},
 	}
@@ -85,18 +73,29 @@ func WithPullSecret(name, namespace string) PoolOption {
 	}
 }
 
-// NodeOption configures a BootcNode for testing.
+// WithMaxUnavailable sets the rollout max unavailable field.
+func WithMaxUnavailable(v intstr.IntOrString) PoolOption {
+	return func(pool *bootcv1alpha1.BootcNodePool) {
+		if pool.Spec.Rollout == nil {
+			pool.Spec.Rollout = &bootcv1alpha1.RolloutSpec{}
+		}
+		pool.Spec.Rollout.MaxUnavailable = &v
+	}
+}
+
+// NodeOption configures a BootcNode.
 type NodeOption func(*bootcv1alpha1.BootcNode)
 
-// NewTestNode creates a BootcNode with sensible defaults for testing.
-// Override any field via functional options.
-func NewTestNode(name string, opts ...NodeOption) *bootcv1alpha1.BootcNode {
+// NewNode creates a BootcNode with the given name and desired image.
+// DesiredImageState defaults to Staged. Override fields via functional
+// options.
+func NewNode(name, desiredImage string, opts ...NodeOption) *bootcv1alpha1.BootcNode {
 	node := &bootcv1alpha1.BootcNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 		},
 		Spec: bootcv1alpha1.BootcNodeSpec{
-			DesiredImage:      testImageDigestRefA,
+			DesiredImage:      desiredImage,
 			DesiredImageState: bootcv1alpha1.DesiredImageStateStaged,
 		},
 	}
