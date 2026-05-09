@@ -1,0 +1,118 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Unit tests
+        run: make unit
+
+      - name: Vet
+        run: make vet
+
+      - name: Lint
+        run: make lint
+
+  # TODO: Replace with fetching a released binary once bink publishes GitHub
+  # releases.
+  build-bink:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout bink
+        uses: actions/checkout@v6
+        with:
+          repository: alicefr/bink
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgpgme-dev \
+            libbtrfs-dev \
+            libdevmapper-dev \
+            pkg-config
+
+      - name: Build bink
+        run: make build-bink
+
+      - name: Upload bink binary
+        uses: actions/upload-artifact@v7
+        with:
+          name: bink
+          path: bink
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: build-bink
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Download bink binary
+        uses: actions/download-artifact@v8
+        with:
+          name: bink
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up KVM
+        run: sudo chmod 666 /dev/kvm
+
+      - name: Configure kernel
+        run: |
+          # Unload AppArmor profiles — the passt profile blocks remount
+          # operations needed for passt's self-sandboxing inside containers.
+          sudo aa-teardown 2>/dev/null || true
+          # Allow unprivileged user namespace creation (needed by passt
+          # inside containers).
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      - name: Enable KSM
+        run: |
+          sudo sh -c 'echo 1 > /sys/kernel/mm/ksm/run'
+          sudo sh -c 'echo 5000 > /sys/kernel/mm/ksm/pages_to_scan'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y podman
+
+      - name: Start podman socket
+        run: systemctl --user start podman.socket
+
+      - name: Run e2e tests
+        run: |
+          chmod +x bink
+          make e2e V=1
+        env:
+          BINK_PATH: ${{ github.workspace }}/bink
