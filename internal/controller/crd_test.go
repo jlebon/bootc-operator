@@ -26,14 +26,31 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	bootcv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
+	testutil "github.com/jlebon/bootc-operator/test/util"
+)
+
+// Test constants for image refs and digests.
+const (
+	testImageTaggedRef = "quay.io/example/myos:latest"
+
+	testDigestA         = "sha256:06f961b802bc46ee168555f066d28f4f0e9afdf3f88174c1ee6f9de004fc30a0" // "A"
+	testDigestB         = "sha256:c0cde77fa8fef97d476c10aad3d2d54fcc2f336140d073651c2dcccf1e379fd6" // "B"
+	testDigestC         = "sha256:12f37a8a84034d3e623d726fe10e5031f4df997ac13f4d5571b5a90c41fb84fe" // "C"
+	testImageDigestRefA = "quay.io/example/myos@" + testDigestA
+	testImageDigestRefB = "quay.io/example/myos@" + testDigestB
+	testImageDigestRefC = "quay.io/example/myos@" + testDigestC
+
+	testSecretName = "my-pull-secret"
+	testSecretNS   = "bootc-operator"
+	testSecretHash = "sha256:b37e50cedcd3e3f1ff64f4afc0422084ae694253cf399326868e07a35f4a45fb" // "secret"
 )
 
 func TestBootcNodePoolCRD(t *testing.T) {
 	ctx := context.Background()
 
-	pool := NewTestPool("workers",
-		WithRebootPolicy(bootcv1alpha1.RebootPolicyAllowSoftReboot),
-		WithPullSecret(testSecretName, testSecretNS),
+	pool := testutil.NewPool("workers", testImageTaggedRef,
+		testutil.WithRebootPolicy(bootcv1alpha1.RebootPolicyAllowSoftReboot),
+		testutil.WithPullSecret(testSecretName, testSecretNS),
 	)
 
 	// Save the spec before Create, which mutates pool in-place with
@@ -113,8 +130,8 @@ func TestBootcNodePoolCRD(t *testing.T) {
 func TestBootcNodeCRD(t *testing.T) {
 	ctx := context.Background()
 
-	node := NewTestNode("worker-1",
-		WithNodePullSecret(testSecretName, testSecretNS, testSecretHash),
+	node := testutil.NewNode("worker-1", testImageDigestRefA,
+		testutil.WithNodePullSecret(testSecretName, testSecretNS, testSecretHash),
 	)
 
 	// Save the spec before Create, which mutates node in-place.
@@ -200,8 +217,8 @@ func TestBootcNodeCRD(t *testing.T) {
 func TestBootcNodePoolEnumValidation(t *testing.T) {
 	ctx := context.Background()
 
-	pool := NewTestPool("invalid-reboot-policy",
-		WithRebootPolicy("Invalid"),
+	pool := testutil.NewPool("invalid-reboot-policy", testImageTaggedRef,
+		testutil.WithRebootPolicy("Invalid"),
 	)
 	if err := k8sClient.Create(ctx, pool); err == nil {
 		k8sClient.Delete(ctx, pool)
@@ -212,7 +229,7 @@ func TestBootcNodePoolEnumValidation(t *testing.T) {
 func TestBootcNodeEnumValidation(t *testing.T) {
 	ctx := context.Background()
 
-	node := NewTestNode("invalid-image-state")
+	node := testutil.NewNode("invalid-image-state", testImageDigestRefA)
 	node.Spec.DesiredImageState = "Invalid"
 	if err := k8sClient.Create(ctx, node); err == nil {
 		k8sClient.Delete(ctx, node)
@@ -223,8 +240,7 @@ func TestBootcNodeEnumValidation(t *testing.T) {
 func TestBootcNodePoolMinLengthValidation(t *testing.T) {
 	ctx := context.Background()
 
-	pool := NewTestPool("empty-image-ref")
-	pool.Spec.Image.Ref = ""
+	pool := testutil.NewPool("empty-image-ref", "")
 	if err := k8sClient.Create(ctx, pool); err == nil {
 		k8sClient.Delete(ctx, pool)
 		t.Fatal("Expected creation with empty image.ref to fail, but it succeeded")
@@ -234,8 +250,7 @@ func TestBootcNodePoolMinLengthValidation(t *testing.T) {
 func TestBootcNodeMinLengthValidation(t *testing.T) {
 	ctx := context.Background()
 
-	node := NewTestNode("empty-desired-image")
-	node.Spec.DesiredImage = ""
+	node := testutil.NewNode("empty-desired-image", "")
 	if err := k8sClient.Create(ctx, node); err == nil {
 		k8sClient.Delete(ctx, node)
 		t.Fatal("Expected creation with empty desiredImage to fail, but it succeeded")
