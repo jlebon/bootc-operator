@@ -221,7 +221,7 @@ func TestBootcNodePoolEnumValidation(t *testing.T) {
 		testutil.WithRebootPolicy("Invalid"),
 	)
 	if err := k8sClient.Create(ctx, pool); err == nil {
-		k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, pool)
 		t.Fatal("Expected creation with invalid rebootPolicy to fail, but it succeeded")
 	}
 }
@@ -232,7 +232,7 @@ func TestBootcNodeEnumValidation(t *testing.T) {
 	node := testutil.NewNode("invalid-image-state", testImageDigestRefA)
 	node.Spec.DesiredImageState = "Invalid"
 	if err := k8sClient.Create(ctx, node); err == nil {
-		k8sClient.Delete(ctx, node)
+		_ = k8sClient.Delete(ctx, node)
 		t.Fatal("Expected creation with invalid desiredImageState to fail, but it succeeded")
 	}
 }
@@ -242,7 +242,7 @@ func TestBootcNodePoolMinLengthValidation(t *testing.T) {
 
 	pool := testutil.NewPool("empty-image-ref", "")
 	if err := k8sClient.Create(ctx, pool); err == nil {
-		k8sClient.Delete(ctx, pool)
+		_ = k8sClient.Delete(ctx, pool)
 		t.Fatal("Expected creation with empty image.ref to fail, but it succeeded")
 	}
 }
@@ -252,7 +252,7 @@ func TestBootcNodeMinLengthValidation(t *testing.T) {
 
 	node := testutil.NewNode("empty-desired-image", "")
 	if err := k8sClient.Create(ctx, node); err == nil {
-		k8sClient.Delete(ctx, node)
+		_ = k8sClient.Delete(ctx, node)
 		t.Fatal("Expected creation with empty desiredImage to fail, but it succeeded")
 	}
 }
