@@ -335,10 +335,11 @@ cache. Then reconcile:
   pull only), and the disruptive reboot step is still gated by
   `maxUnavailable`.
 - **Conflict** (matching node, BootcNode exists but owned by a different
-  pool): Set the pool's `Degraded` condition with reason `NodeConflict`
-  and a message identifying the conflicting pool(s). Do not create a
-  BootcNode for the contested node. Return early -- skip steps 3 and 4
-  for this pool.
+  pool): Do not create a BootcNode for the contested node. Continue
+  reconciling uncontested nodes normally through all steps. After
+  membership sync completes, set the pool's `Degraded` condition with
+  reason `NodeConflict` and a message identifying the conflicting
+  pool(s).
 - **No longer matching** (owned BootcNode whose node doesn't match, or
   whose node was deleted): Delete the BootcNode. Remove the
   `bootc.dev/managed` label if the node still exists (which triggers
