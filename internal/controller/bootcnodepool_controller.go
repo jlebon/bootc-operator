@@ -20,9 +20,12 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"slices"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -104,6 +107,10 @@ func (r *BootcNodePoolReconciler) syncMembership(ctx context.Context, pool *boot
 	}
 
 	// Create BootcNodes for new matches and sync spec for existing ones.
+	// If a BootcNode already exists for a node but is owned by a different
+	// pool, that's a conflict — we skip that node and track the
+	// conflicting pool name.
+	conflicting := map[string]bool{}
 	for nodeName, node := range matchingSet {
 		if bn, exists := ownedSet[nodeName]; exists {
 			// Sync spec fields if needed.
@@ -114,7 +121,15 @@ func (r *BootcNodePoolReconciler) syncMembership(ctx context.Context, pool *boot
 			// New match: create BootcNode and label the node.
 			log.Info("Creating BootcNode for new match", "node", nodeName)
 			if err := r.createBootcNode(ctx, pool, node); err != nil {
-				return fmt.Errorf("creating BootcNode for %s: %w", nodeName, err)
+				if !apierrors.IsAlreadyExists(err) {
+					return fmt.Errorf("creating BootcNode for %s: %w", nodeName, err)
+				}
+				// BootcNode exists but isn't ours — find the owning pool.
+				if existing, ok := allBootcNodes[nodeName]; ok {
+					if owner := metav1.GetControllerOf(existing); owner != nil {
+						conflicting[owner.Name] = true
+					}
+				}
 			}
 		}
 	}
@@ -127,6 +142,15 @@ func (r *BootcNodePoolReconciler) syncMembership(ctx context.Context, pool *boot
 				return fmt.Errorf("removing BootcNode for %s: %w", nodeName, err)
 			}
 		}
+	}
+
+	// Set or clear the conflict condition based on what we found.
+	var conflictingPools []string
+	for name := range conflicting {
+		conflictingPools = append(conflictingPools, name)
+	}
+	if err := r.setConflictCondition(ctx, pool, conflictingPools); err != nil {
+		return fmt.Errorf("setting conflict condition: %w", err)
 	}
 
 	return nil
@@ -189,6 +213,40 @@ func (r *BootcNodePoolReconciler) removeBootcNode(ctx context.Context, bn *bootc
 		return fmt.Errorf("deleting BootcNode: %w", err)
 	}
 
+	return nil
+}
+
+// setConflictCondition sets or clears the Degraded condition with reason
+// NodeConflict on the pool.
+func (r *BootcNodePoolReconciler) setConflictCondition(ctx context.Context, pool *bootcv1alpha1.BootcNodePool, conflictingPools []string) error {
+	var desired metav1.Condition
+	if len(conflictingPools) > 0 {
+		desired = metav1.Condition{
+			Type:   bootcv1alpha1.PoolDegraded,
+			Status: metav1.ConditionTrue,
+			Reason: bootcv1alpha1.PoolNodeConflict,
+			// Sort so the message is stable across reconciles.
+			Message: fmt.Sprintf("Node selector overlaps with pool(s): %s",
+				strings.Join(slices.Sorted(slices.Values(conflictingPools)), ", ")),
+		}
+	} else {
+		desired = metav1.Condition{
+			Type:   bootcv1alpha1.PoolDegraded,
+			Status: metav1.ConditionFalse,
+			Reason: bootcv1alpha1.PoolOK,
+		}
+	}
+
+	existing := apimeta.FindStatusCondition(pool.Status.Conditions, bootcv1alpha1.PoolDegraded)
+	if existing != nil && existing.Status == desired.Status && existing.Reason == desired.Reason && existing.Message == desired.Message {
+		// conflict condition status already matches desired
+		return nil
+	}
+
+	apimeta.SetStatusCondition(&pool.Status.Conditions, desired)
+	if err := r.Status().Update(ctx, pool); err != nil {
+		return fmt.Errorf("updating pool status: %w", err)
+	}
 	return nil
 }
 
