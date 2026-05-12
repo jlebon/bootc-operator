@@ -15,7 +15,7 @@ limitations under the License.
 */
 
 // Package testutil provides shared test helpers for building bootc CRD
-// objects with functional options.
+// objects with functional options. It's used by both envtests and e2e tests.
 package testutil
 
 import (
@@ -28,20 +28,20 @@ import (
 // PoolOption configures a BootcNodePool.
 type PoolOption func(*bootcv1alpha1.BootcNodePool)
 
+// WorkerLabels returns the conventional worker node label map.
+func WorkerLabels() map[string]string {
+	return map[string]string{"node-role.kubernetes.io/worker": ""}
+}
+
 // NewPool creates a BootcNodePool with the given name and image ref.
-// A default worker node selector is applied. Override fields via
-// functional options.
+// A nodeSelector must be provided via WithNodeSelector or
+// WithWorkerSelector. Override fields via functional options.
 func NewPool(name, imageRef string, opts ...PoolOption) *bootcv1alpha1.BootcNodePool {
 	pool := &bootcv1alpha1.BootcNodePool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: name,
 		},
 		Spec: bootcv1alpha1.BootcNodePoolSpec{
-			NodeSelector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					"node-role.kubernetes.io/worker": "",
-				},
-			},
 			Image: bootcv1alpha1.ImageSpec{
 				Ref: imageRef,
 			},
@@ -81,6 +81,21 @@ func WithMaxUnavailable(v intstr.IntOrString) PoolOption {
 		}
 		pool.Spec.Rollout.MaxUnavailable = &v
 	}
+}
+
+// WithNodeSelector sets the nodeSelector on a pool.
+func WithNodeSelector(labels map[string]string) PoolOption {
+	return func(pool *bootcv1alpha1.BootcNodePool) {
+		pool.Spec.NodeSelector = &metav1.LabelSelector{
+			MatchLabels: labels,
+		}
+	}
+}
+
+// WithWorkerSelector sets the nodeSelector to the conventional worker
+// node label.
+func WithWorkerSelector() PoolOption {
+	return WithNodeSelector(WorkerLabels())
 }
 
 // NodeOption configures a BootcNode.

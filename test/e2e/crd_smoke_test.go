@@ -38,7 +38,7 @@ func TestCRDSmoke(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("BootcNodePool", func(t *testing.T) {
-		pool := testutil.NewPool("smoke-pool", "quay.io/example/myos:latest")
+		pool := testutil.NewPool("smoke-pool", "quay.io/example/myos:latest", testutil.WithWorkerSelector())
 
 		if err := env.Client.Create(ctx, pool); err != nil {
 			t.Fatalf("Failed to create BootcNodePool: %v", err)
