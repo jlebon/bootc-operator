@@ -37,16 +37,16 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: unit
-unit: manifests generate setup-envtest ## Run unit tests (envtest). V=1 for verbose.
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $(if $(V),-v) $$(go list ./... | grep -v /test/e2e)
+unit: manifests generate setup-envtest ## Run unit tests (envtest). V=1 for verbose. RUN=<regex> to filter.
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $(if $(V),-v) $(if $(RUN),-run $(RUN)) $$(go list ./... | grep -v /test/e2e)
 
 .PHONY: e2e
-e2e: manifests generate ## Run e2e tests (requires bink). V=1 for verbose.
+e2e: manifests generate ## Run e2e tests (requires bink). V=1 for verbose. RUN=<regex> to filter.
 # NB: we `cd` here instead of passing a package path to `go test` so that `-v`
 # actually gives us streaming output (otherwise, it spawns a subprocess for
 # each package, even though we just have one here--but I really like streaming
 # output...).
-	cd test/e2e && go test -timeout 10m -count=1 $(if $(V),-v) .
+	cd test/e2e && go test -timeout 10m -count=1 $(if $(V),-v) $(if $(RUN),-run $(RUN)) .
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter.

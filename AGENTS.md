@@ -11,8 +11,8 @@ Read these docs before making changes:
 ## Building and Testing
 
 - `make build` — build all binaries
-- `make unit` — run unit tests (includes envtest setup, CRD generation). `V=1` for verbose.
-- `make e2e` — run e2e tests (requires bink; uses `BINK_PATH` env var or PATH). `V=1` for verbose streaming output.
+- `make unit` — run unit tests (includes envtest setup, CRD generation). `V=1` for verbose. `RUN=<regex>` to filter.
+- `make e2e` — run e2e tests (requires bink; uses `BINK_PATH` env var or PATH). `V=1` for verbose streaming output. `RUN=<regex>` to filter.
 - `make fmt` — run go fmt
 - `make vet` — run go vet
 - `make lint` — run golangci-lint
