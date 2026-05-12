@@ -11,7 +11,7 @@ Read these docs before making changes:
 ## Building and Testing
 
 - `make build` — build all binaries
-- `make unit` — run unit tests (includes envtest setup, CRD generation)
+- `make unit` — run unit tests (includes envtest setup, CRD generation). `V=1` for verbose.
 - `make e2e` — run e2e tests (requires bink; uses `BINK_PATH` env var or PATH). `V=1` for verbose streaming output.
 - `make fmt` — run go fmt
 - `make vet` — run go vet

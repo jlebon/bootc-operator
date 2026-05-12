@@ -37,8 +37,8 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 .PHONY: unit
-unit: manifests generate setup-envtest ## Run unit tests (envtest).
-	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $$(go list ./... | grep -v /test/e2e)
+unit: manifests generate setup-envtest ## Run unit tests (envtest). V=1 for verbose.
+	KUBEBUILDER_ASSETS="$(shell "$(ENVTEST)" use $(ENVTEST_K8S_VERSION) --bin-dir "$(LOCALBIN)" -p path)" go test $(if $(V),-v) $$(go list ./... | grep -v /test/e2e)
 
 .PHONY: e2e
 e2e: manifests generate ## Run e2e tests (requires bink). V=1 for verbose.
