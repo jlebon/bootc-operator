@@ -186,6 +186,9 @@ func startCluster(t *testing.T, clusterName string, memory int) {
 	if memory > 0 {
 		args = append(args, "--memory", fmt.Sprintf("%d", memory))
 	}
+	if img := os.Getenv("BINK_NODE_IMAGE"); img != "" {
+		args = append(args, "--node-image", img)
+	}
 
 	t.Logf("Starting bink cluster %q...", clusterName)
 	if err := runBink(t, args...); err != nil {
