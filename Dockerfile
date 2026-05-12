@@ -1,4 +1,4 @@
-FROM quay.io/fedora/fedora-minimal:43 AS builder
+FROM quay.io/fedora/fedora-minimal:44 AS builder
 ARG DNF_FLAGS="-y --setopt=install_weak_deps=False"
 
 RUN --mount=type=cache,rw,id=dnf,target=/var/cache/libdnf5 \
@@ -10,7 +10,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -a -o manager ./cmd/
 
-FROM quay.io/fedora/fedora-minimal:43
+FROM quay.io/fedora/fedora-minimal:44
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532
