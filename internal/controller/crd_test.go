@@ -49,6 +49,7 @@ func TestBootcNodePoolCRD(t *testing.T) {
 	ctx := context.Background()
 
 	pool := testutil.NewPool("workers", testImageTaggedRef,
+		testutil.WithWorkerSelector(),
 		testutil.WithRebootPolicy(bootcv1alpha1.RebootPolicyAllowSoftReboot),
 		testutil.WithPullSecret(testSecretName, testSecretNS),
 	)
@@ -218,6 +219,7 @@ func TestBootcNodePoolEnumValidation(t *testing.T) {
 	ctx := context.Background()
 
 	pool := testutil.NewPool("invalid-reboot-policy", testImageTaggedRef,
+		testutil.WithWorkerSelector(),
 		testutil.WithRebootPolicy("Invalid"),
 	)
 	if err := k8sClient.Create(ctx, pool); err == nil {
@@ -240,7 +242,7 @@ func TestBootcNodeEnumValidation(t *testing.T) {
 func TestBootcNodePoolMinLengthValidation(t *testing.T) {
 	ctx := context.Background()
 
-	pool := testutil.NewPool("empty-image-ref", "")
+	pool := testutil.NewPool("empty-image-ref", "", testutil.WithWorkerSelector())
 	if err := k8sClient.Create(ctx, pool); err == nil {
 		_ = k8sClient.Delete(ctx, pool)
 		t.Fatal("Expected creation with empty image.ref to fail, but it succeeded")
