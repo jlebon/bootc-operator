@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
@@ -95,9 +96,13 @@ func New(t *testing.T, opts ...Option) *Env {
 	})
 
 	kubeconfigPath := exposeAPI(t, clusterName)
-	applyManifests(t, kubeconfigPath, projectRoot)
+
 	k8sClient := buildClient(t, kubeconfigPath)
 	waitForNodeReady(t, k8sClient, "node1")
+
+	pushControllerImage(t)
+	applyManifests(t, kubeconfigPath, projectRoot)
+	waitForControllerReady(t, k8sClient)
 
 	return &Env{
 		Client:     k8sClient,
@@ -220,30 +225,153 @@ func exposeAPI(t *testing.T, clusterName string) string {
 	return kubeconfigPath
 }
 
-// applyManifests runs `kubectl apply -k config/default/` to deploy the
-// operator manifests (CRDs, RBAC, manager Deployment).
+const (
+	// registryImage is the pullspec used to push to the bink registry
+	// from the host.
+	registryImage = "localhost:5000/bootc-operator:e2e"
+	// inClusterControllerRepo is the in-cluster registry repo for the
+	// controller image (without tag).
+	inClusterControllerRepo = "registry.cluster.local:5000/bootc-operator"
+	// inClusterControllerTag is the tag used for the controller image.
+	inClusterControllerTag = "e2e"
+)
+
+// controllerImagePushed tracks whether the image has already been pushed
+// for this test run. Multiple tests share the same image.
+var (
+	controllerImagePushed     bool
+	controllerImagePushedOnce sync.Once
+)
+
+// pushControllerImage pushes the pre-built controller image (from IMG
+// env var, set by the Makefile) to the bink registry. This is done once
+// per test run.
+func pushControllerImage(t *testing.T) {
+	t.Helper()
+
+	controllerImagePushedOnce.Do(func() {
+		srcImage := os.Getenv("IMG")
+		if srcImage == "" {
+			t.Fatal("IMG env var not set (run via 'make e2e')")
+		}
+
+		t.Logf("Pushing %s to %s...", srcImage, registryImage)
+		cmd := exec.Command("podman", "push", "--tls-verify=false", srcImage, registryImage)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		if err := cmd.Run(); err != nil {
+			t.Fatalf("pushing controller image: %v", err)
+		}
+
+		controllerImagePushed = true
+	})
+
+	if !controllerImagePushed {
+		t.Fatal("controller image push failed in another test")
+	}
+}
+
+// applyManifests applies the operator manifests with the controller
+// image set to the in-cluster registry pullspec. It creates a temporary
+// kustomize overlay that references the project's config/default via a
+// symlink and adds an image override.
 func applyManifests(t *testing.T, kubeconfigPath, projectRoot string) {
 	t.Helper()
-	t.Log("Applying operator manifests (config/default/)...")
+	t.Logf("Applying operator manifests with controller image %s...", inClusterControllerRepo+":"+inClusterControllerTag)
 
 	kubectl, err := exec.LookPath("kubectl")
 	if err != nil {
 		t.Fatal("kubectl not found on PATH")
 	}
 
-	// We shell out to kubectl rather than using a Go client because
-	// kubectl handles kustomize rendering and server-side apply in one
-	// shot — reimplementing that in Go would be significant.
-	kustomizeDir := filepath.Join(projectRoot, "config", "default")
+	// Build a temp dir with an overlay kustomization that references
+	// the project's config/default via a relative path. The layout is:
+	//   <tmpdir>/config -> <projectRoot>/config  (symlink)
+	//   <tmpdir>/overlay/kustomization.yaml      (overlay)
+	// So the overlay can use "../config/default" as a resource (because
+	// kustomize doesn't allow absolute paths for resources).
+	tmpdir := t.TempDir()
+
+	absConfig, _ := filepath.Abs(filepath.Join(projectRoot, "config"))
+	if err := os.Symlink(absConfig, filepath.Join(tmpdir, "config")); err != nil {
+		t.Fatalf("creating config symlink: %v", err)
+	}
+
+	overlay := filepath.Join(tmpdir, "overlay")
+	if err := os.Mkdir(overlay, 0755); err != nil {
+		t.Fatalf("creating overlay dir: %v", err)
+	}
+
+	kustomization := fmt.Sprintf(`
+resources:
+- ../config/default
+images:
+- name: controller
+  newName: %s
+  newTag: %s
+patches:
+- patch: |
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: bootc-operator-controller-manager
+      namespace: bootc-operator
+    spec:
+      template:
+        spec:
+          tolerations:
+          - key: node-role.kubernetes.io/control-plane
+            operator: Exists
+            effect: NoSchedule
+`, inClusterControllerRepo, inClusterControllerTag)
+	if err := os.WriteFile(filepath.Join(overlay, "kustomization.yaml"), []byte(kustomization), 0644); err != nil {
+		t.Fatalf("writing overlay kustomization: %v", err)
+	}
+
 	cmd := exec.Command(kubectl, "apply",
 		"--kubeconfig", kubeconfigPath,
-		"-k", kustomizeDir,
+		"-k", overlay,
 		"--server-side",
 	)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("applying manifests: %v", err)
+		t.Fatalf("kubectl apply failed: %v", err)
+	}
+}
+
+// waitForControllerReady waits for the controller manager Deployment to
+// have at least one ready replica.
+func waitForControllerReady(t *testing.T, c client.Client) {
+	t.Helper()
+	t.Log("Waiting for controller to be ready...")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	defer cancel()
+
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			t.Fatal("timed out waiting for controller to be ready")
+		case <-ticker.C:
+			var dep appsv1.Deployment
+			key := client.ObjectKey{
+				Namespace: "bootc-operator",
+				Name:      "bootc-operator-controller-manager",
+			}
+			if err := c.Get(ctx, key, &dep); err != nil {
+				t.Logf("  controller deployment not found yet: %v", err)
+				continue
+			}
+			if dep.Status.ReadyReplicas > 0 {
+				t.Log("  controller is ready")
+				return
+			}
+			t.Logf("  controller not ready yet (ready=%d)", dep.Status.ReadyReplicas)
+		}
 	}
 }
 
