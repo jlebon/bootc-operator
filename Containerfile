@@ -1,7 +1,7 @@
 FROM quay.io/fedora/fedora-minimal:44 AS builder
 ARG DNF_FLAGS="-y --setopt=install_weak_deps=False"
 
-RUN --mount=type=cache,rw,id=dnf,target=/var/cache/libdnf5 \
+RUN --mount=type=cache,id=dnf,target=/var/cache/libdnf5 \
     dnf install ${DNF_FLAGS} golang
 
 WORKDIR /workspace
