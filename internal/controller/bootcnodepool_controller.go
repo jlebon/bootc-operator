@@ -75,6 +75,14 @@ func (r *BootcNodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 	// Snapshot status so we can detect changes and write once at the end.
 	statusOrig := pool.Status.DeepCopy()
 
+	// Start with conditions in a healthy state; sync functions only set
+	// degraded conditions when something is wrong.
+	apimeta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
+		Type:   bootcv1alpha1.PoolDegraded,
+		Status: metav1.ConditionFalse,
+		Reason: bootcv1alpha1.PoolOK,
+	})
+
 	// Sync pool membership.
 	if err := r.syncMembership(ctx, &pool); err != nil {
 		if isInvalidSpecError(err) {
@@ -253,28 +261,16 @@ func (r *BootcNodePoolReconciler) removeBootcNode(ctx context.Context, bn *bootc
 // reason NodeConflict on the pool. It only mutates the in-memory
 // object; the caller is responsible for writing status.
 func syncConflictCondition(pool *bootcv1alpha1.BootcNodePool, conflictingPools []string) {
-	var desired metav1.Condition
 	if len(conflictingPools) > 0 {
-		desired = metav1.Condition{
+		apimeta.SetStatusCondition(&pool.Status.Conditions, metav1.Condition{
 			Type:   bootcv1alpha1.PoolDegraded,
 			Status: metav1.ConditionTrue,
 			Reason: bootcv1alpha1.PoolNodeConflict,
 			// Sort so the message is stable across reconciles.
 			Message: fmt.Sprintf("Node selector overlaps with pool(s): %s",
 				strings.Join(slices.Sorted(slices.Values(conflictingPools)), ", ")),
-		}
-	} else {
-		// XXX: this shouldn't live here; we'll probably want to centralize
-		// Condition setting so it only happens once per type per Reconcile()
-		// so we don't flipflop between different status states within the same
-		// iteration.
-		desired = metav1.Condition{
-			Type:   bootcv1alpha1.PoolDegraded,
-			Status: metav1.ConditionFalse,
-			Reason: bootcv1alpha1.PoolOK,
-		}
+		})
 	}
-	apimeta.SetStatusCondition(&pool.Status.Conditions, desired)
 }
 
 // syncBootcNodeSpec updates a BootcNode's spec fields to match the pool.
