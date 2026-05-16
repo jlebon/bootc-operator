@@ -27,6 +27,10 @@ const (
 	// determined by the controller by comparing spec.desiredImage
 	// against status.booted.imageDigest.
 	NodeIdle string = "Idle"
+
+	// NodeDegraded indicates that the daemon has encountered an error.
+	// The reason and message provide details about the specific error.
+	NodeDegraded string = "Degraded"
 )
 
 // NodeIdle condition reasons.
@@ -43,9 +47,16 @@ const (
 
 	// NodeReasonRebooting means a reboot is in progress.
 	NodeReasonRebooting string = "Rebooting"
+)
 
-	// NodeReasonStagingFailed means something went wrong during staging.
-	NodeReasonStagingFailed string = "StagingFailed"
+// NodeDegraded condition reasons.
+const (
+	// NodeReasonError is a catch-all reason for daemon errors. The
+	// condition message provides details about the specific error.
+	NodeReasonError string = "Error"
+
+	// NodeReasonOK means no errors.
+	NodeReasonOK string = "OK"
 )
 
 // DesiredImageState describes the target state the daemon should drive
@@ -152,7 +163,7 @@ type BootcNodeStatus struct {
 	Rollback *ImageInfo `json:"rollback,omitempty"`
 
 	// conditions represent the daemon's current state.
-	// The sole condition type is "Idle".
+	// Known condition types are "Idle" and "Degraded".
 	// +listType=map
 	// +listMapKey=type
 	// +optional

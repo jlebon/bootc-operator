@@ -147,12 +147,13 @@ the full controller+daemon loop can be tested end-to-end.
   prior state in `bootc.dev/was-cordoned`) → drain (using
   `k8s.io/kubectl/pkg/drain`, async goroutine, no timeout by default)
   → set `desiredImageState: Booted`
-- Post-reboot: detect `desiredImage == booted` + node Ready → uncordon
-  (respecting `was-cordoned`) → free slot
+- Post-reboot: detect node is healthy (`Idle=True`, not Degraded) and
+  K8s Node is Ready → uncordon (respecting `was-cordoned`) → free slot
 - `spec.rollout.paused`: block new reboot slot assignments; let
   in-progress staging complete
-- Error handling: StagingFailed → mark pool Degraded, continue rollout
-  on other nodes; post-reboot NotReady beyond timeout → halt rollout
+- Error handling: node Degraded → mark pool Degraded, continue rollout
+  on other nodes; when 2+ nodes in reboot slots are unhealthy (Degraded
+  or not Ready), stop assigning new slots
   (no new `desiredImageState: Booted`)
 
 **Validation (envtest):**
@@ -164,16 +165,19 @@ the full controller+daemon loop can be tested end-to-end.
   changes mid-rollout.
 - Verify pause blocks new reboot slot assignments but lets staging
   complete. Resume and verify rollout continues.
-- Simulate `StagingFailed` on one node, verify rollout continues on
-  others. Simulate post-reboot `NotReady`, verify rollout halts.
+- Simulate `Degraded` on one node, verify rollout continues on
+  others.
+- Simulate 2 unhealthy nodes in reboot slots (e.g. post-reboot
+  NotReady), verify the controller stops assigning new slots even
+  when `maxUnavailable` has capacity.
 
 ### 3c. Pool status aggregation
 
 - Compute `nodeCount`, `updatedCount`, `updatingCount`, `degradedCount`
 - `UpToDate` condition with reasons: `AllUpdated`, `RolloutInProgress`,
   `Paused`
-- `Degraded` condition with reasons: `NodeConflict`, `StagingFailed`,
-  `NodeNotReady`, `DaemonStuck`, `OK`
+- `Degraded` condition with reasons: `NodeConflict`, `NodeDegraded`,
+  `OK`
 - Message on `UpToDate=False` includes breakdown (e.g. "5/10 updated;
   2 staging, 2 staged, 1 rebooting")
 - Set `deployedDigest = targetDigest` when all nodes match
@@ -184,8 +188,8 @@ the full controller+daemon loop can be tested end-to-end.
   reflect BootcNode states accurately.
 - Verify `UpToDate` condition transitions: `RolloutInProgress` during
   update, `Paused` when paused, `AllUpdated` when complete.
-- Verify `Degraded` condition reasons: `StagingFailed`, `NodeNotReady`,
-  `DaemonStuck`, `NodeConflict`, and `OK` when clear.
+- Verify `Degraded` condition reasons: `NodeDegraded`,
+  `NodeConflict`, and `OK` when clear.
 - Verify `UpToDate=False` message includes state breakdown.
 - Verify `deployedDigest = targetDigest` when all nodes match.
 
@@ -222,7 +226,7 @@ daemon populates BootcNode status from `bootc status`.
   run `bootc switch <desiredImage>` (no `--download-only` for now;
   [pending upstream](https://github.com/bootc-dev/bootc/issues/2137))
 - On success → set `Idle=False reason=Staged`
-- On error → set `Idle=False reason=StagingFailed`
+- On error → set `Idle=True`, `Degraded=True reason=Error`
 - Detect `spec.desiredImageState == Booted` + staged matches desired →
   set `Idle=False reason=Rebooting`, run `bootc switch --apply` and
   reboot

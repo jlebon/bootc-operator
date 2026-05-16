@@ -130,7 +130,7 @@ spec:
               conditions:
                 description: |-
                   conditions represent the daemon's current state.
-                  The sole condition type is "Idle".
+                  Known condition types are "Idle" and "Degraded".
                 items:
                   description: Condition contains details for one aspect of the current
                     state of this API Resource.
