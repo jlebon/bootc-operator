@@ -49,14 +49,10 @@ const (
 	// PoolNodeConflict means a node's labels match multiple pool selectors.
 	PoolNodeConflict string = "NodeConflict"
 
-	// PoolStagingFailed means one or more nodes failed to stage the update.
-	PoolStagingFailed string = "StagingFailed"
-
-	// PoolNodeNotReady means a node did not become Ready after reboot.
-	PoolNodeNotReady string = "NodeNotReady"
-
-	// PoolDaemonStuck means the daemon is not responding on one or more nodes.
-	PoolDaemonStuck string = "DaemonStuck"
+	// PoolNodeDegraded means one or more nodes have encountered errors
+	// or are not converging. The condition message identifies the
+	// affected nodes and their issues.
+	PoolNodeDegraded string = "NodeDegraded"
 
 	// PoolInvalidSpec means the pool's spec contains invalid values that
 	// the controller cannot process (e.g. an image ref that is not a

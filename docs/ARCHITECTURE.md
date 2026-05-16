@@ -136,9 +136,8 @@ Pool conditions and their reasons:
 | UpToDate  | False  | RolloutInProgress | Nodes are actively being updated                  |
 | UpToDate  | False  | Paused            | Updates pending but pool is paused                |
 | Degraded  | True   | NodeConflict      | Node selector overlaps with another pool          |
-| Degraded  | True   | StagingFailed     | One or more nodes failed to stage                 |
-| Degraded  | True   | NodeNotReady      | A node did not come back after reboot             |
-| Degraded  | True   | DaemonStuck       | Daemon not responding on one or more nodes        |
+| Degraded  | True   | NodeDegraded      | At least one node has errors or isn't converging  |
+| Degraded  | True   | InvalidSpec       | Pool spec contains invalid values                 |
 | Degraded  | False  | OK                | No issues                                         |
 
 The `UpToDate` condition is determined by the controller by comparing
@@ -147,9 +146,8 @@ When the condition is `False`, the `message` field includes a breakdown of node
 states (e.g. "5/10 updated; 2 staging, 2 staged, 1 rebooting") so the user can
 see exactly what's happening without inspecting individual BootcNodes.
 
-The `DaemonStuck` reason is set when one or more nodes have
-`desiredImage != booted` but the daemon reports `Idle=True` (the
-"Pending" state in the state table) for an extended period.
+The `NodeDegraded` reason is set when one or more nodes have a
+`Degraded=True` condition (daemon-reported errors).
 
 Note each node can belong to at most one BootcNodePool. If a node matches
 multiple pool selectors, the controller sets `Degraded` with reason
@@ -195,20 +193,32 @@ status:                     # ← written by daemon
       status: "False"
       reason: Staged
       message: "Image staged, awaiting desiredImageState: Booted"
+    - type: Degraded
+      status: "False"
+      reason: OK
 ```
 
-The `Idle` condition reports whether the daemon is actively doing work.
-It does **not** claim whether the node is "up to date" -- that is
-determined by the controller by comparing `spec.desiredImage` against
-`status.booted.imageDigest`.
+The `Idle` condition represents where the node is in the update
+lifecycle. It does **not** claim whether the node is "up to date" --
+that is determined by the controller by comparing `spec.desiredImage`
+against `status.booted.imageDigest`.
 
-| Status | Reason        | Meaning                                             |
-|--------|---------------|-----------------------------------------------------|
-| True   | Idle          | Daemon has no active update cycle                   |
-| False  | Staging       | Pulling/staging the image                           |
-| False  | Staged        | Image staged, waiting for desiredImageState: Booted |
-| False  | Rebooting     | Reboot in progress                                  |
-| False  | StagingFailed | Something went wrong during staging                 |
+| Status | Reason    | Meaning                                             |
+|--------|-----------|-----------------------------------------------------|
+| True   | Idle      | Daemon has no active update cycle                   |
+| False  | Staging   | Pulling/staging the image                           |
+| False  | Staged    | Image staged, waiting for desiredImageState: Booted |
+| False  | Rebooting | Reboot in progress                                  |
+
+The `Degraded` condition represents errors the daemon is hitting at
+the current point in that lifecycle. For example, a daemon with
+`Idle=False/Staging` and `Degraded=True` would mean that the daemon
+is having trouble staging the update.
+
+| Status | Reason | Meaning                                           |
+|--------|--------|---------------------------------------------------|
+| True   | Error  | Daemon encountered an error (message has details) |
+| False  | OK     | No errors                                         |
 
 ## Daemon Logic
 
@@ -223,7 +233,7 @@ spec (from the controller) and local bootc status.
     │                               ok ──┴── error
     │                               │        │
     │                               ▼        ▼
-    │                           Staged   StagingFailed
+    │                           Staged   Degraded=True
     │                               │
     │                   desiredImageState == Booted
     │                   && staged == desiredImage
@@ -240,8 +250,9 @@ spec (from the controller) and local bootc status.
 
 The daemon sets `Idle=True` when `desiredImage == booted` (or on startup
 if they match). It sets `Idle=False` with the appropriate reason when an
-update cycle is in progress. It never claims whether the node is "up to
-date" -- that determination is made by the controller.
+update cycle is in progress. Errors are reported via the `Degraded`
+condition independently of `Idle`. The daemon never claims whether the
+node is "up to date" -- that determination is made by the controller.
 
 On startup and on fsnotify event (see [Detecting bootc status
 changes](#detecting-bootc-status-changes)), the daemon reads `bootc
@@ -375,43 +386,51 @@ The effective state of a BootcNode is determined by three fields:
 - `status.conditions[Idle]` -- set by the daemon to report whether it
   is actively working. The daemon sets `Idle=True` when it has no
   active update cycle, and `Idle=False` with a reason when it does.
+- `status.conditions[Degraded]` -- set by the daemon to report errors.
+  Independent of `Idle`: a daemon can be idle and degraded (tried,
+  failed, stopped), or actively retrying and degraded.
 
 The controller determines whether a node is up to date by comparing
 `spec.desiredImage` against `status.booted.imageDigest`. It does not
-rely on the daemon's `Idle` condition for this -- a misbehaving daemon
-that claims `Idle=True` while the images don't match will be detected
-by the controller and surfaced at the pool level.
+rely on the daemon's `Idle` condition for this.
 
-State determination:
+The controller classifies each node into one of five effective states.
+The `Degraded` condition is checked first (takes priority over activity
+state).
 
-| `desiredImage` vs booted | `Idle` condition     | Effective state | Reconciler action                                                 |
-|--------------------------|----------------------|-----------------|-------------------------------------------------------------------|
-| == booted                | True                 | Idle            | If in reboot slot: free slot only once node is Ready              |
-| == booted                | False                | Settling        | Wait for daemon to set Idle=True; if persists, flag at pool level |
-| != booted                | True                 | Pending         | Daemon should be working; if persists, flag at pool level         |
-| != booted                | False, Staging       | Staging         | Wait for daemon (non-disruptive)                                  |
-| != booted                | False, StagingFailed | StagingFailed   | Mark degraded                                                     |
-| != booted                | False, Staged        | Staged          | If reboot slot available: assign slot; else wait                  |
-| != booted                | False, Rebooting     | Rebooting       | Wait for node to come back                                        |
+| Effective state | Determination                                             | Reconciler action                                    |
+|-----------------|-----------------------------------------------------------|------------------------------------------------------|
+| Degraded        | BootcNode `Degraded=True`                                 | Mark pool degraded                                   |
+| Idle            | `desiredImage == booted` and `Idle=True`                  | If in reboot slot: free slot only once node is Ready |
+| Staging         | `desiredImage != booted`, `Idle=False reason=Staging`     | Wait (non-disruptive)                                |
+| Staged          | `desiredImage != booted`, `Idle=False reason=Staged`      | If reboot slot available: assign slot; else wait     |
+| Rebooting       | `desiredImage != booted`, `Idle=False reason=Rebooting`   | Wait for node to come back                           |
 
-The pool has `maxUnavailable` **reboot slots**. A node enters a reboot
-slot when the controller cordons it, drains it, and sets
-`desiredImageState: Booted`. The node holds its slot until it reboots
-into the desired image and the controller uncordons it, freeing the
-slot for the next candidate.
+The pool has `maxUnavailable` **reboot slots**. Reboot slots are
+governed by three rules:
 
-Staging is non-disruptive (image pull only) and does not occupy a
-reboot slot. Neither do Pending and Staged nodes -- they are still
-serving workloads normally.
+1. **A node can only take a reboot slot when healthy** -- only Staged
+   nodes (not Degraded) are candidates for reboot slots.
+2. **A node can only release a reboot slot when healthy** -- after
+   reboot, the slot is held until the node is Idle (`Idle=True`, not
+   Degraded) and the K8s Node is Ready. A node that is Degraded or
+   not Ready post-reboot holds its slot indefinitely.
+3. **2 unhealthy nodes in reboot slots stop the rollout** -- when 2 or
+   more nodes occupying reboot slots are unhealthy (Degraded or not
+   Ready), the controller stops assigning new slots. A single
+   unhealthy node might be a hardware issue, but two suggest the image
+   is bad. Note that Degraded is a BootcNode condition while Ready is
+   a K8s Node condition -- these are independent checks.
 
-Error handling depends on the failure type:
-- **Staging errors** (StagingFailed): likely node-specific (disk,
-  network). The pool is marked `Degraded` but the rollout continues
-  on other nodes.
-- **Post-reboot errors** (node not Ready beyond timeout): likely
-  image-specific. The rollout is halted -- no further nodes are set
-  to `desiredImageState: Booted` until the error is resolved.
-  Already-rebooting nodes finish, but no new nodes are cordoned.
+A node enters a slot when the controller cordons it, drains it, and
+sets `desiredImageState: Booted`. Staging is non-disruptive (image pull
+only) and does not occupy a slot. Staged nodes waiting for a slot are
+still serving workloads normally.
+
+Nodes reporting `Degraded=True` are flagged at the pool level via
+`Degraded/NodeDegraded`. Unhealthy nodes that never
+entered a reboot slot (e.g. staging failed) do not block the rollout
+-- other nodes continue normally.
 
 The controller and daemon each own specific transitions:
 
@@ -422,13 +441,14 @@ The controller and daemon each own specific transitions:
   │        │                     │ (daemon   │◄──────────────┤ (waiting │
   │        │                     │  pulling) │ staged !=     │ for slot)│
   │        │                     │           │ desiredImage  │          │
-  └────▲───┘                     └─────┬─────┘               └────┬─────┘
-       │                               │                          │
-       │                               │ error              slot  │
-       │                               ▼                 assigned │
-       │                      ┌────────────────┐                  │
-       │                      │ StagingFailed  │                  │
-       │                      └────────────────┘                  │
+  └────▲───┘                     └───────────┘               └────┬─────┘
+       │                                                          │
+       │                                                    slot  │
+       │                                                 assigned │
+       │                                                          │
+       │                                                          │
+       │                                                          │
+       │                                                          │
        │                                                          │
        │                                       ┌───────────┐      │
        │               node reboots,           │ Rebooting │      │
@@ -449,11 +469,6 @@ Transition details:
   successfully and sets `Idle=False reason=Staged`. The staged image is locked
   and safe from unexpected reboots. If `desiredImage` changed during staging,
   the mismatch is caught in the Staged state (see Staged → Staging below).
-
-- **Staging → StagingFailed**: The daemon's `bootc switch --download-only` failed. Sets
-  `Idle=False reason=StagingFailed`. The node is marked degraded. Staging errors
-  are likely node-specific (disk, network), so the rollout continues on other
-  nodes.
 
 - **Staged → Staging** (re-stage): If `staged.imageDigest != desiredImage`
   (because `desiredImage` changed while staging or while waiting for a
@@ -483,11 +498,14 @@ Transition details:
   unschedulable before) and removes the annotation. This frees the
   reboot slot for the next candidate.
 
-- **Node not Ready beyond timeout**: The node holds its reboot slot,
-  naturally blocking further reboots. If the node does not become Ready
-  within a timeout, it is marked degraded. Post-reboot failures are
-  likely image-specific, so the rollout is halted -- no further nodes
-  are set to `desiredImageState: Booted` until the error is resolved.
+- **Any → Degraded**: The daemon is encountering an error either
+  trying to stay in its current state, or trying to transition to another
+  state. For example, if a `bootc` command keeps failing. The daemon sets
+  `Degraded=True reason=Error` with a message describing the failure. The
+  controller classifies this as `nodeStateDegraded` and flags it at the
+  pool level. A degraded node in a reboot slot keeps its slot. Two
+  degraded nodes cause the rollout to stop (see reboot slot rules above).
+
 
 **4. Aggregate pool status**
 
@@ -642,7 +660,15 @@ the operator namespace.
    pullspec we own, and we cache the layers ourselves. Need to make sure it
    doesn't conflict with signature policy enforcement feature.
 
-7. **Cross-pool rollout ordering**: Allow a pool to declare a dependency
+7. **Stuck node detection**: The controller could track non-progressing nodes
+   and escalate them (e.g. mark the pool as degraded) after a time threshold.
+   This would cover cases where the daemon has not responded to a controller
+   action: `desiredImage != booted` with `Idle=True` (daemon should be staging),
+   `desiredImage == booted` without `Idle=True` (daemon should have settled),
+   and `desiredImageState == Booted` with `Idle=False reason=Staged` (daemon
+   should be rebooting).
+
+8. **Cross-pool rollout ordering**: Allow a pool to declare a dependency
    on another pool (e.g. `dependsOn: workers`). The reconciler would
    gate rollout on the dependency pool reaching `UpToDate=True` first.
    The primary use case is updating worker nodes before control plane
