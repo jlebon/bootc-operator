@@ -18,11 +18,11 @@ package e2e
 
 import (
 	"context"
-	"fmt"
 	"maps"
 	"testing"
 	"time"
 
+	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -41,6 +41,10 @@ const (
 // creates a BootcNodePool selecting the worker node, and verifies that
 // a BootcNode is created and the node is labeled bootc.dev/managed.
 func TestControllerMembership(t *testing.T) {
+	g := NewWithT(t)
+	g.SetDefaultEventuallyTimeout(pollTimeout)
+	g.SetDefaultEventuallyPollingInterval(pollInterval)
+
 	env := e2eutil.New(t)
 
 	ctx := context.Background()
@@ -48,46 +52,36 @@ func TestControllerMembership(t *testing.T) {
 	// The bink cluster has a node called "node1". Label it as a worker so it
 	// matches our pool's default nodeSelector. XXX: lower this down to bink?
 	var node corev1.Node
-	if err := env.Client.Get(ctx, client.ObjectKey{Name: "node1"}, &node); err != nil {
-		t.Fatalf("Failed to get node1: %v", err)
-	}
+	g.Expect(env.Client.Get(ctx, client.ObjectKey{Name: "node1"}, &node)).To(Succeed())
 	patch := client.StrategicMergeFrom(node.DeepCopy())
 	if node.Labels == nil {
 		node.Labels = map[string]string{}
 	}
 	maps.Copy(node.Labels, testutil.WorkerLabels())
-	if err := env.Client.Patch(ctx, &node, patch); err != nil {
-		t.Fatalf("Failed to label node1 as worker: %v", err)
-	}
+	g.Expect(env.Client.Patch(ctx, &node, patch)).To(Succeed())
 
 	// Create a pool with a digest ref.
-	imageRef := "quay.io/example/myos@sha256:abc123"
+	imageRef := "quay.io/example/myos@sha256:06f961b802bc46ee168555f066d28f4f0e9afdf3f88174c1ee6f9de004fc30a0"
 	pool := testutil.NewPool("e2e-workers", imageRef, testutil.WithWorkerSelector())
-	if err := env.Client.Create(ctx, pool); err != nil {
-		t.Fatalf("Failed to create pool: %v", err)
-	}
+	g.Expect(env.Client.Create(ctx, pool)).To(Succeed())
 
 	// Wait for BootcNode to appear for node1.
 	var bn bootcv1alpha1.BootcNode
-	testutil.WaitForCreated(t, pollTimeout, pollInterval, env.Client, client.ObjectKey{Name: "node1"}, &bn)
+	g.Eventually(func() error {
+		return env.Client.Get(ctx, client.ObjectKey{Name: "node1"}, &bn)
+	}).Should(Succeed())
 
 	// Verify ownerReference.
 	owner := metav1.GetControllerOf(&bn)
-	if owner == nil || owner.Name != "e2e-workers" {
-		t.Errorf("BootcNode owner = %v, want e2e-workers", owner)
-	}
+	g.Expect(owner).NotTo(BeNil())
+	g.Expect(owner.Name).To(Equal("e2e-workers"))
 
 	// Verify desiredImage.
-	if bn.Spec.DesiredImage != imageRef {
-		t.Errorf("BootcNode desiredImage = %q, want %q", bn.Spec.DesiredImage, imageRef)
-	}
+	g.Expect(bn.Spec.DesiredImage).To(Equal(imageRef))
 
 	// Verify node1 has the managed label.
-	testutil.WaitFor(t, pollTimeout, pollInterval, "node1 to be labeled bootc.dev/managed", func() (bool, error) {
-		if err := env.Client.Get(ctx, client.ObjectKey{Name: "node1"}, &node); err != nil {
-			return false, fmt.Errorf("getting node1: %w", err)
-		}
-		_, ok := node.Labels[bootcv1alpha1.LabelManaged]
-		return ok, nil
-	})
+	g.Eventually(func() (map[string]string, error) {
+		err := env.Client.Get(ctx, client.ObjectKey{Name: "node1"}, &node)
+		return node.Labels, err
+	}).Should(HaveKey(bootcv1alpha1.LabelManaged))
 }

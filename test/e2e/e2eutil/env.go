@@ -31,6 +31,7 @@ import (
 	"testing"
 	"time"
 
+	. "github.com/onsi/gomega" //nolint:staticcheck
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,7 +40,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	bootcv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
-	testutil "github.com/jlebon/bootc-operator/test/util"
 )
 
 // config holds resolved settings for the test cluster.
@@ -348,26 +348,22 @@ func waitForControllerReady(t *testing.T, c client.Client) {
 	t.Helper()
 	t.Log("Waiting for controller to be ready...")
 
+	g := NewWithT(t)
 	ctx := context.Background()
-	testutil.WaitFor(t, 3*time.Minute, 5*time.Second, "controller to be ready", func() (bool, error) {
+	g.Eventually(func(g Gomega) {
 		var dep appsv1.Deployment
 		key := client.ObjectKey{
 			Namespace: "bootc-operator",
 			Name:      "bootc-operator-controller-manager",
 		}
-		if err := c.Get(ctx, key, &dep); apierrors.IsNotFound(err) {
+		err := c.Get(ctx, key, &dep)
+		if apierrors.IsNotFound(err) {
 			t.Logf("  controller deployment not found yet")
-			return false, nil
-		} else if err != nil {
-			return false, err
 		}
-		if dep.Status.ReadyReplicas > 0 {
-			t.Log("  controller is ready")
-			return true, nil
-		}
-		t.Logf("  controller not ready yet (ready=%d)", dep.Status.ReadyReplicas)
-		return false, nil
-	})
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(dep.Status.ReadyReplicas).To(BeNumerically(">", 0))
+		t.Log("  controller is ready")
+	}).WithTimeout(3 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 }
 
 // buildClient creates a controller-runtime client from the kubeconfig
@@ -397,23 +393,21 @@ func waitForNodeReady(t *testing.T, c client.Client, nodeName string) {
 	t.Helper()
 	t.Logf("Waiting for node %q to be Ready...", nodeName)
 
+	g := NewWithT(t)
 	ctx := context.Background()
-	testutil.WaitFor(t, 5*time.Minute, 5*time.Second, "node "+nodeName+" to be Ready", func() (bool, error) {
+	g.Eventually(func(g Gomega) {
 		node := &corev1.Node{}
-		if err := c.Get(ctx, client.ObjectKey{Name: nodeName}, node); apierrors.IsNotFound(err) {
+		err := c.Get(ctx, client.ObjectKey{Name: nodeName}, node)
+		if apierrors.IsNotFound(err) {
 			t.Logf("  node %q not found yet", nodeName)
-			return false, nil
-		} else if err != nil {
-			return false, err
 		}
-		for _, cond := range node.Status.Conditions {
-			if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-				t.Logf("  node %q is Ready", nodeName)
-				return true, nil
-			}
-		}
-		return false, nil
-	})
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(node.Status.Conditions).To(ContainElement(And(
+			HaveField("Type", corev1.NodeReady),
+			HaveField("Status", corev1.ConditionTrue),
+		)), "node %q not Ready yet", nodeName)
+		t.Logf("  node %q is Ready", nodeName)
+	}).WithTimeout(5 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
 }
 
 // runBink executes a bink command and returns any error.

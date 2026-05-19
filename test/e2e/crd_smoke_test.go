@@ -20,6 +20,7 @@ import (
 	"context"
 	"testing"
 
+	. "github.com/onsi/gomega"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	bootcv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
@@ -38,45 +39,31 @@ func TestCRDSmoke(t *testing.T) {
 	ctx := context.Background()
 
 	t.Run("BootcNodePool", func(t *testing.T) {
+		g := NewWithT(t)
+
 		pool := testutil.NewPool("smoke-pool", "quay.io/example/myos:latest", testutil.WithWorkerSelector())
 
-		if err := env.Client.Create(ctx, pool); err != nil {
-			t.Fatalf("Failed to create BootcNodePool: %v", err)
-		}
+		g.Expect(env.Client.Create(ctx, pool)).To(Succeed())
 
 		got := &bootcv1alpha1.BootcNodePool{}
-		if err := env.Client.Get(ctx, client.ObjectKeyFromObject(pool), got); err != nil {
-			t.Fatalf("Failed to get BootcNodePool: %v", err)
-		}
-		if got.Spec.Image.Ref != "quay.io/example/myos:latest" {
-			t.Errorf("image.ref = %q, want %q", got.Spec.Image.Ref, "quay.io/example/myos:latest")
-		}
+		g.Expect(env.Client.Get(ctx, client.ObjectKeyFromObject(pool), got)).To(Succeed())
+		g.Expect(got.Spec.Image.Ref).To(Equal("quay.io/example/myos:latest"))
 
-		if err := env.Client.Delete(ctx, pool); err != nil {
-			t.Fatalf("Failed to delete BootcNodePool: %v", err)
-		}
+		g.Expect(env.Client.Delete(ctx, pool)).To(Succeed())
 	})
 
 	t.Run("BootcNode", func(t *testing.T) {
+		g := NewWithT(t)
+
 		node := testutil.NewNode("smoke-node", "quay.io/example/myos@sha256:abc123")
 
-		if err := env.Client.Create(ctx, node); err != nil {
-			t.Fatalf("Failed to create BootcNode: %v", err)
-		}
+		g.Expect(env.Client.Create(ctx, node)).To(Succeed())
 
 		got := &bootcv1alpha1.BootcNode{}
-		if err := env.Client.Get(ctx, client.ObjectKeyFromObject(node), got); err != nil {
-			t.Fatalf("Failed to get BootcNode: %v", err)
-		}
-		if got.Spec.DesiredImage != "quay.io/example/myos@sha256:abc123" {
-			t.Errorf("desiredImage = %q, want %q", got.Spec.DesiredImage, "quay.io/example/myos@sha256:abc123")
-		}
-		if got.Spec.DesiredImageState != bootcv1alpha1.DesiredImageStateStaged {
-			t.Errorf("desiredImageState = %q, want %q", got.Spec.DesiredImageState, bootcv1alpha1.DesiredImageStateStaged)
-		}
+		g.Expect(env.Client.Get(ctx, client.ObjectKeyFromObject(node), got)).To(Succeed())
+		g.Expect(got.Spec.DesiredImage).To(Equal("quay.io/example/myos@sha256:abc123"))
+		g.Expect(got.Spec.DesiredImageState).To(Equal(bootcv1alpha1.DesiredImageStateStaged))
 
-		if err := env.Client.Delete(ctx, node); err != nil {
-			t.Fatalf("Failed to delete BootcNode: %v", err)
-		}
+		g.Expect(env.Client.Delete(ctx, node)).To(Succeed())
 	})
 }
