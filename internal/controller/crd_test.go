@@ -18,10 +18,11 @@ package controller
 
 import (
 	"context"
-	"reflect"
 	"testing"
 	"time"
 
+	. "github.com/onsi/gomega"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -46,6 +47,7 @@ const (
 )
 
 func TestBootcNodePoolCRD(t *testing.T) {
+	g := NewWithT(t)
 	ctx := context.Background()
 
 	pool := testutil.NewPool("workers", testImageTaggedRef,
@@ -59,28 +61,21 @@ func TestBootcNodePoolCRD(t *testing.T) {
 	wantSpec := *pool.Spec.DeepCopy()
 
 	// Create
-	if err := k8sClient.Create(ctx, pool); err != nil {
-		t.Fatalf("Failed to create BootcNodePool: %v", err)
-	}
+	g.Expect(k8sClient.Create(ctx, pool)).To(Succeed())
 	t.Cleanup(func() {
-		if err := k8sClient.Delete(ctx, pool); client.IgnoreNotFound(err) != nil {
-			t.Logf("cleanup: failed to delete pool: %v", err)
-		}
+		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, pool))
 	})
 
 	// Retrieve and verify spec round-trips. We set all defaulted
 	// fields explicitly (RebootPolicy), so the input and output specs
 	// should match exactly.
 	got := &bootcv1alpha1.BootcNodePool{}
-	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(pool), got); err != nil {
-		t.Fatalf("Failed to get BootcNodePool: %v", err)
-	}
-	if !reflect.DeepEqual(got.Spec, wantSpec) {
-		t.Errorf("spec mismatch:\n  got:  %+v\n  want: %+v", got.Spec, wantSpec)
-	}
+	g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pool), got)).To(Succeed())
+	g.Expect(got.Spec).To(Equal(wantSpec))
 }
 
 func TestBootcNodeCRD(t *testing.T) {
+	g := NewWithT(t)
 	ctx := context.Background()
 
 	node := testutil.NewNode("worker-1", testImageDigestRefA,
@@ -91,27 +86,19 @@ func TestBootcNodeCRD(t *testing.T) {
 	wantSpec := *node.Spec.DeepCopy()
 
 	// Create
-	if err := k8sClient.Create(ctx, node); err != nil {
-		t.Fatalf("Failed to create BootcNode: %v", err)
-	}
+	g.Expect(k8sClient.Create(ctx, node)).To(Succeed())
 	t.Cleanup(func() {
-		if err := k8sClient.Delete(ctx, node); client.IgnoreNotFound(err) != nil {
-			t.Logf("cleanup: failed to delete node: %v", err)
-		}
+		_ = client.IgnoreNotFound(k8sClient.Delete(ctx, node))
 	})
 
 	// Retrieve and verify spec round-trips. BootcNodeSpec has no
 	// defaulted fields, so the input and output should match exactly.
 	got := &bootcv1alpha1.BootcNode{}
-	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(node), got); err != nil {
-		t.Fatalf("Failed to get BootcNode: %v", err)
-	}
-	if !reflect.DeepEqual(got.Spec, wantSpec) {
-		t.Errorf("spec mismatch:\n  got:  %+v\n  want: %+v", got.Spec, wantSpec)
-	}
+	g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), got)).To(Succeed())
+	g.Expect(got.Spec).To(Equal(wantSpec))
 
 	// Update status. Use a fixed timestamp truncated to seconds to match the
-	// precision the API server stores so we can just `DeepEqual` the whole thing.
+	// precision the API server stores so we can just `Equal` the whole thing.
 	now := metav1.NewTime(time.Now().UTC().Truncate(time.Second))
 	ts := metav1.NewTime(time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC))
 	got.Status = bootcv1alpha1.BootcNodeStatus{
@@ -145,68 +132,69 @@ func TestBootcNodeCRD(t *testing.T) {
 		},
 	}
 	wantStatus := *got.Status.DeepCopy() // snapshot before Update
-	if err := k8sClient.Status().Update(ctx, got); err != nil {
-		t.Fatalf("Failed to update BootcNode status: %v", err)
-	}
+	g.Expect(k8sClient.Status().Update(ctx, got)).To(Succeed())
 
 	// Verify status round-trips
-	if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(node), got); err != nil {
-		t.Fatalf("Failed to get BootcNode after status update: %v", err)
-	}
+	g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node), got)).To(Succeed())
 	// Copy canonical timestamps from the server response so
-	// DeepEqual ignores timezone/precision differences.
+	// Equal ignores timezone/precision differences.
 	for i := range wantStatus.Conditions {
 		wantStatus.Conditions[i].LastTransitionTime = got.Status.Conditions[i].LastTransitionTime
 	}
 	if wantStatus.Booted != nil && wantStatus.Booted.Timestamp != nil {
 		wantStatus.Booted.Timestamp = got.Status.Booted.Timestamp
 	}
-	if !reflect.DeepEqual(got.Status, wantStatus) {
-		t.Errorf("status mismatch:\n  got:  %+v\n  want: %+v", got.Status, wantStatus)
-	}
-
+	g.Expect(got.Status).To(Equal(wantStatus))
 }
 
 func TestBootcNodePoolEnumValidation(t *testing.T) {
+	g := NewWithT(t)
 	ctx := context.Background()
 
 	pool := testutil.NewPool("invalid-reboot-policy", testImageTaggedRef,
 		testutil.WithWorkerSelector(),
 		testutil.WithRebootPolicy("Invalid"),
 	)
-	if err := k8sClient.Create(ctx, pool); err == nil {
+	err := k8sClient.Create(ctx, pool)
+	if err == nil {
 		_ = k8sClient.Delete(ctx, pool)
-		t.Fatal("Expected creation with invalid rebootPolicy to fail, but it succeeded")
 	}
+	g.Expect(err).To(MatchError(apierrors.IsInvalid, "IsInvalid"))
 }
 
 func TestBootcNodeEnumValidation(t *testing.T) {
+	g := NewWithT(t)
 	ctx := context.Background()
 
 	node := testutil.NewNode("invalid-image-state", testImageDigestRefA)
 	node.Spec.DesiredImageState = "Invalid"
-	if err := k8sClient.Create(ctx, node); err == nil {
+	err := k8sClient.Create(ctx, node)
+	if err == nil {
 		_ = k8sClient.Delete(ctx, node)
-		t.Fatal("Expected creation with invalid desiredImageState to fail, but it succeeded")
 	}
+	g.Expect(err).To(MatchError(apierrors.IsInvalid, "IsInvalid"))
 }
 
 func TestBootcNodePoolMinLengthValidation(t *testing.T) {
+	g := NewWithT(t)
 	ctx := context.Background()
 
 	pool := testutil.NewPool("empty-image-ref", "", testutil.WithWorkerSelector())
-	if err := k8sClient.Create(ctx, pool); err == nil {
+	err := k8sClient.Create(ctx, pool)
+	if err == nil {
 		_ = k8sClient.Delete(ctx, pool)
-		t.Fatal("Expected creation with empty image.ref to fail, but it succeeded")
 	}
+	g.Expect(err).To(MatchError(apierrors.IsInvalid, "IsInvalid"))
 }
 
 func TestBootcNodeMinLengthValidation(t *testing.T) {
+	g := NewWithT(t)
 	ctx := context.Background()
 
 	node := testutil.NewNode("empty-desired-image", "")
-	if err := k8sClient.Create(ctx, node); err == nil {
+	err := k8sClient.Create(ctx, node)
+	if err == nil {
 		_ = k8sClient.Delete(ctx, node)
-		t.Fatal("Expected creation with empty desiredImage to fail, but it succeeded")
 	}
+	g.Expect(err).To(MatchError(apierrors.IsInvalid, "IsInvalid"))
 }
