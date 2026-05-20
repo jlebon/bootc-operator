@@ -245,4 +245,32 @@ func TestMembershipConflictDetection(t *testing.T) {
 		g.Expect(owner.Name).To(Equal(tc.poolName))
 	}
 
+	// Now resolve the conflict: remove pool1=true from node3 so pool1
+	// releases it, then pool2 can claim it.
+	var freshNode3 corev1.Node
+	g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(node3), &freshNode3)).To(Succeed())
+	patch := client.StrategicMergeFrom(freshNode3.DeepCopy())
+	delete(freshNode3.Labels, "pool1")
+	g.Expect(k8sClient.Patch(ctx, &freshNode3, patch)).To(Succeed())
+
+	// Verify pool2 recovers: Degraded condition should clear.
+	g.Eventually(func() ([]metav1.Condition, error) {
+		var p bootcv1alpha1.BootcNodePool
+		err := k8sClient.Get(ctx, client.ObjectKeyFromObject(pool2), &p)
+		return p.Status.Conditions, err
+	}).Should(ContainElement(And(
+		HaveField("Type", bootcv1alpha1.PoolDegraded),
+		HaveField("Status", metav1.ConditionFalse),
+		HaveField("Reason", bootcv1alpha1.PoolOK),
+	)))
+
+	// Verify node3 is now owned by pool2.
+	g.Eventually(func() (*metav1.OwnerReference, error) {
+		var bn bootcv1alpha1.BootcNode
+		err := k8sClient.Get(ctx, client.ObjectKeyFromObject(node3), &bn)
+		return metav1.GetControllerOf(&bn), err
+	}).Should(And(
+		Not(BeNil()),
+		HaveField("Name", pool2.Name),
+	))
 }
