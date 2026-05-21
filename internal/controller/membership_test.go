@@ -246,15 +246,16 @@ func TestMembershipConflictDetection(t *testing.T) {
 	})
 
 	// Wait for pool2 to be marked Degraded/NodeConflict.
-	g.Eventually(func(g Gomega) {
+	g.Eventually(func() ([]metav1.Condition, error) {
 		var p bootcv1alpha1.BootcNodePool
-		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(pool2), &p)).To(Succeed())
-		cond := apimeta.FindStatusCondition(p.Status.Conditions, bootcv1alpha1.PoolDegraded)
-		g.Expect(cond).NotTo(BeNil())
-		g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
-		g.Expect(cond.Reason).To(Equal(bootcv1alpha1.PoolNodeConflict))
-		g.Expect(cond.Message).To(ContainSubstring(pool1.Name))
-	}).Should(Succeed())
+		err := k8sClient.Get(ctx, client.ObjectKeyFromObject(pool2), &p)
+		return p.Status.Conditions, err
+	}).Should(ContainElement(And(
+		HaveField("Type", bootcv1alpha1.PoolDegraded),
+		HaveField("Status", metav1.ConditionTrue),
+		HaveField("Reason", bootcv1alpha1.PoolNodeConflict),
+		HaveField("Message", ContainSubstring(pool1.Name)),
+	)))
 
 	// Verify pool1 is not degraded.
 	var p1 bootcv1alpha1.BootcNodePool
