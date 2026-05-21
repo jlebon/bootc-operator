@@ -70,4 +70,20 @@ func TestControllerMembership(t *testing.T) {
 		err := env.Client.Get(ctx, client.ObjectKey{Name: "node1"}, &node)
 		return node.Labels, err
 	}).Should(HaveKey(bootcv1alpha1.LabelManaged))
+
+	// Verify daemon pod schedules on the managed node and reaches Running.
+	g.Eventually(func() ([]corev1.Pod, error) {
+		var pods corev1.PodList
+		err := env.Client.List(ctx, &pods,
+			client.InNamespace("bootc-operator"),
+			client.MatchingLabels{
+				"app.kubernetes.io/name":      "bootc-operator",
+				"app.kubernetes.io/component": "daemon",
+			},
+		)
+		return pods.Items, err
+	}).Should(ConsistOf(And(
+		HaveField("Spec.NodeName", "node1"),
+		HaveField("Status.Phase", corev1.PodRunning),
+	)), "expected exactly one running daemon pod on node1")
 }
