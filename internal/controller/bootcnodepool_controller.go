@@ -276,11 +276,11 @@ func (r *BootcNodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 func (r *BootcNodePoolReconciler) resolveTargetDigest(pool *bootcv1alpha1.BootcNodePool) error {
 	ref, err := parseImageRef(pool.Spec.Image.Ref)
 	if err != nil {
-		return &invalidSpecError{fmt.Sprintf("invalid image ref %q: %v", pool.Spec.Image.Ref, err)}
+		return newInvalidSpecError(fmt.Sprintf("invalid image ref %q: %v", pool.Spec.Image.Ref, err))
 	}
 	digested, ok := ref.(reference.Digested)
 	if !ok {
-		return &invalidSpecError{fmt.Sprintf("image ref %q has no digest (tag resolution not yet supported)", pool.Spec.Image.Ref)}
+		return newInvalidSpecError(fmt.Sprintf("image ref %q has no digest (tag resolution not yet supported)", pool.Spec.Image.Ref))
 	}
 	pool.Status.TargetDigest = digested.Digest().String()
 	return nil
@@ -299,6 +299,10 @@ func parseImageRef(ref string) (reference.Named, error) {
 // Degraded/InvalidSpec conditions rather than requeueing with backoff.
 type invalidSpecError struct {
 	msg string
+}
+
+func newInvalidSpecError(msg string) *invalidSpecError {
+	return &invalidSpecError{msg: msg}
 }
 
 func (e *invalidSpecError) Error() string { return e.msg }
@@ -408,7 +412,7 @@ func (r *BootcNodePoolReconciler) syncMembership(ctx context.Context, pool *boot
 func (r *BootcNodePoolReconciler) listMatchingNodes(ctx context.Context, pool *bootcv1alpha1.BootcNodePool) ([]corev1.Node, error) {
 	selector, err := metav1.LabelSelectorAsSelector(pool.Spec.NodeSelector)
 	if err != nil {
-		return nil, &invalidSpecError{msg: fmt.Sprintf("invalid nodeSelector: %v", err)}
+		return nil, newInvalidSpecError(fmt.Sprintf("invalid nodeSelector: %v", err))
 	}
 
 	var nodeList corev1.NodeList
