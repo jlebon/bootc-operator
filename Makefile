@@ -59,11 +59,15 @@ lint-fix: golangci-lint ## Run golangci-lint linter and perform fixes.
 ##@ Build
 
 .PHONY: build
-build: build-manager ## Build all binaries.
+build: build-manager build-daemon ## Build all binaries.
 
 .PHONY: build-manager
 build-manager: ## Build manager binary.
 	go build -o bin/manager ./cmd/controller/
+
+.PHONY: build-daemon
+build-daemon: ## Build daemon binary.
+	go build -o bin/daemon ./cmd/daemon/
 
 .PHONY: buildimg
 buildimg: ## Build container image.
