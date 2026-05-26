@@ -6,6 +6,9 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  BINK_VERSION: v0.1.1
+
 concurrency:
   group: ci-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
@@ -32,56 +35,18 @@ jobs:
       - name: Lint
         run: make lint
 
-  # TODO: Replace with fetching a released binary once bink publishes GitHub
-  # releases.
-  build-bink:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout bink
-        uses: actions/checkout@v6
-        with:
-          repository: alicefr/bink
-
-      - name: Set up Go
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-          cache: true
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libgpgme-dev \
-            libbtrfs-dev \
-            libdevmapper-dev \
-            pkg-config
-
-      - name: Build bink
-        run: make build-bink
-
-      - name: Upload bink binary
-        uses: actions/upload-artifact@v7
-        with:
-          name: bink
-          path: bink
-
   e2e:
     runs-on: ubuntu-latest
-    needs: build-bink
     timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Download bink binary
-        uses: actions/download-artifact@v8
-        with:
-          name: bink
-          path: /usr/local/bin
-
-      - name: Make bink executable
-        run: chmod +x /usr/local/bin/bink
+      - name: Download bink release
+        run: |
+          sudo curl -fsSL -o /usr/local/bin/bink \
+            https://github.com/alicefr/bink/releases/download/${{ env.BINK_VERSION }}/bink
+          sudo chmod +x /usr/local/bin/bink
 
       - name: Set up Go
         uses: actions/setup-go@v6
