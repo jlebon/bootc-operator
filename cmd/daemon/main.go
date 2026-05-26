@@ -4,13 +4,20 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"os"
 
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+
+	bootcv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
+	"github.com/jlebon/bootc-operator/internal/daemon"
 )
 
 var (
@@ -20,6 +27,7 @@ var (
 
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+	utilruntime.Must(bootcv1alpha1.AddToScheme(scheme))
 }
 
 func main() {
@@ -31,15 +39,38 @@ func main() {
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
+	nodeName := os.Getenv("NODE_NAME")
+	if nodeName == "" {
+		setupLog.Error(fmt.Errorf("NODE_NAME not set"), "NODE_NAME environment variable is required")
+		os.Exit(1)
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
+		// Only cache the BootcNode object for this node to avoid unnecessary watches.
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&bootcv1alpha1.BootcNode{}: {
+					Field: fields.OneTermEqualSelector("metadata.name", nodeName),
+				},
+			},
+		},
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
 		os.Exit(1)
 	}
 
-	setupLog.Info("Starting daemon")
+	if err := (&daemon.BootcNodeReconciler{
+		Client:   mgr.GetClient(),
+		Scheme:   mgr.GetScheme(),
+		NodeName: nodeName,
+	}).SetupWithManager(mgr); err != nil {
+		setupLog.Error(err, "Failed to create controller", "controller", "bootcnode")
+		os.Exit(1)
+	}
+
+	setupLog.Info("Starting daemon", "node", nodeName)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run daemon")
 		os.Exit(1)
