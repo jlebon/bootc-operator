@@ -5,3 +5,5 @@ resources:
 - leader_election_role.yaml
 - leader_election_role_binding.yaml
 - daemon_service_account.yaml
+- daemon_role.yaml
+- daemon_role_binding.yaml
