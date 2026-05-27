@@ -120,7 +120,7 @@ the full controller+daemon loop can be tested end-to-end.
 - Label nodes `bootc.dev/managed: ""`
 - Handle node leaving pool (label removed or node deleted): delete
   BootcNode, remove `bootc.dev/managed` label, restore cordon state
-  via `bootc.dev/was-cordoned` annotation
+  via `bootc.dev/was-cordoned` annotation on the BootcNode
 - Conflict detection: node matches multiple pools →
   `Degraded/NodeConflict` on conflicting pools, skip rollout steps
 
@@ -144,11 +144,12 @@ the full controller+daemon loop can be tested end-to-end.
   to `Staged` when `desiredImage` changes
 - Reboot slot accounting based on `maxUnavailable`
 - Drive transitions per the state table: detect Staged → cordon (record
-  prior state in `bootc.dev/was-cordoned`) → drain (using
+  prior state in `bootc.dev/was-cordoned` on the BootcNode) → drain (using
   `k8s.io/kubectl/pkg/drain`, async goroutine, no timeout by default)
   → set `desiredImageState: Booted`
 - Post-reboot: detect node is healthy (`Idle=True`, not Degraded) and
-  K8s Node is Ready → uncordon (respecting `was-cordoned`) → free slot
+  K8s Node is Ready → uncordon (respecting `was-cordoned` on the
+  BootcNode) → free slot
 - `spec.rollout.paused`: block new reboot slot assignments; let
   in-progress staging complete
 - Error handling: node Degraded → mark pool Degraded, continue rollout

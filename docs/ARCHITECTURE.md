@@ -354,8 +354,10 @@ cache. Then reconcile:
 - **No longer matching** (owned BootcNode whose node doesn't match, or
   whose node was deleted): Delete the BootcNode. Remove the
   `bootc.dev/managed` label if the node still exists (which triggers
-  DaemonSet pod removal). If the node has the `bootc.dev/was-cordoned`
-  annotation, restore the prior cordon state and remove the annotation.
+  DaemonSet pod removal). If the BootcNode has the
+  `bootc.dev/was-cordoned` annotation, restore the prior cordon state
+  on the K8s Node. If the BootcNode has the `bootc.dev/in-reboot-slot`
+  annotation, remove it (freeing the slot).
 
 Sync each BootcNode's spec fields from the pool: set `desiredImage` to
 `targetDigest`, and copy `pullSecretRef` and `pullSecretHash` (if they
@@ -422,10 +424,12 @@ governed by three rules:
    is bad. Note that Degraded is a BootcNode condition while Ready is
    a K8s Node condition -- these are independent checks.
 
-A node enters a slot when the controller cordons it, drains it, and
-sets `desiredImageState: Booted`. Staging is non-disruptive (image pull
-only) and does not occupy a slot. Staged nodes waiting for a slot are
-still serving workloads normally.
+A node enters a slot when the controller sets the
+`bootc.dev/in-reboot-slot` annotation on the BootcNode, cordons the
+K8s Node, and starts draining. The annotation is the persistent marker
+for slot occupancy -- it survives controller restarts. Staging is
+non-disruptive (image pull only) and does not occupy a slot. Staged
+nodes waiting for a slot are still serving workloads normally.
 
 Nodes reporting `Degraded=True` are flagged at the pool level via
 `Degraded/NodeDegraded`. Unhealthy nodes that never
@@ -477,8 +481,10 @@ Transition details:
   `desiredImage`.
 
 - **Staged → Rebooting**: The controller assigns the node a reboot
-  slot if one is available. It cordons the node and records prior
-  cordon state in the `bootc.dev/was-cordoned` annotation. It starts
+  slot if one is available. It sets the `bootc.dev/in-reboot-slot`
+  annotation on the BootcNode, cordons the K8s Node, and records
+  prior cordon state in the `bootc.dev/was-cordoned` annotation on
+  the BootcNode. It starts
   an async drain goroutine using `k8s.io/kubectl/pkg/drain`. The
   goroutine blocks until drain completes (or is cancelled), then
   signals completion via a channel that re-enqueues the pool. On
@@ -495,8 +501,8 @@ Transition details:
   controller detects that `desiredImage == booted` but keeps the reboot
   slot occupied until the node is Ready. Once Ready, it restores prior
   cordon state (uncordons only if the node was not already
-  unschedulable before) and removes the annotation. This frees the
-  reboot slot for the next candidate.
+  unschedulable before) and removes both annotations from the
+  BootcNode. This frees the reboot slot for the next candidate.
 
 - **Any → Degraded**: The daemon is encountering an error either
   trying to stay in its current state, or trying to transition to another
