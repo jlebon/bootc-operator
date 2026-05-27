@@ -9,8 +9,15 @@ const (
 	// the node.
 	LabelManaged = "bootc.dev/managed"
 
-	// AnnotationWasCordoned records whether a node was already cordoned
-	// before the controller cordoned it for a reboot. Used to restore
-	// prior cordon state after update.
+	// AnnotationInRebootSlot is set on a BootcNode when the controller
+	// assigns it a reboot slot (cordons the K8s Node and starts
+	// draining). Cleared when the slot is freed (node is healthy and
+	// Ready after reboot). Used for persistent slot counting across
+	// controller restarts.
+	AnnotationInRebootSlot = "bootc.dev/in-reboot-slot"
+
+	// AnnotationWasCordoned is set on a BootcNode to record whether
+	// the K8s Node was already cordoned before the controller cordoned
+	// it for a reboot. Used to restore prior cordon state after update.
 	AnnotationWasCordoned = "bootc.dev/was-cordoned"
 )
