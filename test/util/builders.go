@@ -87,6 +87,16 @@ func WithMaxUnavailable(v intstr.IntOrString) PoolOption {
 	}
 }
 
+// WithPaused sets the rollout paused field.
+func WithPaused(paused bool) PoolOption {
+	return func(pool *bootcv1alpha1.BootcNodePool) {
+		if pool.Spec.Rollout == nil {
+			pool.Spec.Rollout = &bootcv1alpha1.RolloutSpec{}
+		}
+		pool.Spec.Rollout.Paused = paused
+	}
+}
+
 // WithDrainTimeoutSeconds sets the rollout drain timeout in seconds.
 func WithDrainTimeoutSeconds(seconds int32) PoolOption {
 	return func(pool *bootcv1alpha1.BootcNodePool) {
@@ -142,6 +152,36 @@ func NewNode(name, desiredImage string, opts ...NodeOption) *bootcv1alpha1.Bootc
 		o(node)
 	}
 	return node
+}
+
+// WithBootedDigest sets the booted image digest in the node's status.
+func WithBootedDigest(digest string) NodeOption {
+	return func(node *bootcv1alpha1.BootcNode) {
+		node.Status.Booted = &bootcv1alpha1.ImageInfo{
+			ImageDigest: digest,
+		}
+	}
+}
+
+// WithNodeCondition appends a condition to the node's status.
+func WithNodeCondition(condType string, status metav1.ConditionStatus, reason string) NodeOption {
+	return func(node *bootcv1alpha1.BootcNode) {
+		node.Status.Conditions = append(node.Status.Conditions, metav1.Condition{
+			Type:   condType,
+			Status: status,
+			Reason: reason,
+		})
+	}
+}
+
+// WithNodeAnnotation sets a single annotation on the node.
+func WithNodeAnnotation(key, value string) NodeOption {
+	return func(node *bootcv1alpha1.BootcNode) {
+		if node.Annotations == nil {
+			node.Annotations = make(map[string]string)
+		}
+		node.Annotations[key] = value
+	}
 }
 
 // WithNodePullSecret sets the pull secret reference and hash on a node.
