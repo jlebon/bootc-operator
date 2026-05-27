@@ -256,6 +256,9 @@ func (r *BootcNodePoolReconciler) Reconcile(ctx context.Context, req ctrl.Reques
 
 	// Drive the rollout state machine.
 	if err := r.driveRollout(ctx, &pool, ownedBootcNodes); err != nil {
+		if isInvalidSpecError(err) {
+			return r.setInvalidSpecCondition(ctx, &pool, err)
+		}
 		return ctrl.Result{}, fmt.Errorf("driving rollout: %w", err)
 	}
 

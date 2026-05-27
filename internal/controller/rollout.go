@@ -5,33 +5,174 @@ package controller
 import (
 	"context"
 	"fmt"
+	"slices"
+	"strings"
 
 	"github.com/distribution/reference"
+	"github.com/go-logr/logr"
 	apimeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	bootcv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
 )
 
-// driveRollout iterates owned BootcNodes, classifies each by the state
-// table, and logs their states. Transition logic is added in later
-// commits.
-func (r *BootcNodePoolReconciler) driveRollout(ctx context.Context, pool *bootcv1alpha1.BootcNodePool, ownedBootcNodes map[string]*bootcv1alpha1.BootcNode) error {
-	log := logf.FromContext(ctx).WithValues("pool", pool.Name)
+// rolloutState holds the classified BootcNodes for a single reconcile
+// pass.
+type rolloutState struct {
+	// nodes are sorted into these buckets
+	idle         []*bootcv1alpha1.BootcNode
+	staging      []*bootcv1alpha1.BootcNode
+	staged       []*bootcv1alpha1.BootcNode
+	rebooting    []*bootcv1alpha1.BootcNode
+	degraded     []*bootcv1alpha1.BootcNode
+	unclassified []*bootcv1alpha1.BootcNode
 
+	// BootcNodes with the in-reboot-slot annotation
+	occupiedSlots int
+}
+
+// nodeCount returns the total number of nodes in the pool, including
+// unclassified ones. Used for resolving percentage-based maxUnavailable.
+func (rs *rolloutState) nodeCount() int {
+	return len(rs.idle) + len(rs.staging) + len(rs.staged) +
+		len(rs.rebooting) + len(rs.degraded) + len(rs.unclassified)
+}
+
+// driveRollout is the main function that advances the rollout state machine.
+func (r *BootcNodePoolReconciler) driveRollout(ctx context.Context, pool *bootcv1alpha1.BootcNodePool, ownedBootcNodes map[string]*bootcv1alpha1.BootcNode) error {
+	log := logf.FromContext(ctx)
+
+	rs := buildRolloutState(log, ownedBootcNodes)
+
+	maxUnavail, err := resolveMaxUnavailable(pool, rs.nodeCount())
+	if err != nil {
+		return err
+	}
+
+	avail := max(0, maxUnavail-rs.occupiedSlots)
+	candidates := selectDrainCandidates(rs.staged, avail)
+
+	log.V(1).Info("Rollout state",
+		"idle", len(rs.idle),
+		"staging", len(rs.staging),
+		"staged", len(rs.staged),
+		"rebooting", len(rs.rebooting),
+		"degraded", len(rs.degraded),
+		"unclassified", nodeNames(rs.unclassified),
+		"occupiedSlots", rs.occupiedSlots,
+		"maxUnavailable", maxUnavail,
+		"availableSlots", avail,
+		"candidates", nodeNames(candidates),
+	)
+
+	return nil
+}
+
+// buildRolloutState classifies all owned BootcNodes and counts occupied
+// reboot slots.
+func buildRolloutState(log logr.Logger, ownedBootcNodes map[string]*bootcv1alpha1.BootcNode) *rolloutState {
+	rs := &rolloutState{}
 	for _, bn := range ownedBootcNodes {
+		// Count occupied reboot slots from the persistent annotation.
+		if metav1.HasAnnotation(bn.ObjectMeta, bootcv1alpha1.AnnotationInRebootSlot) {
+			rs.occupiedSlots++
+		}
+
 		state, err := classifyNode(bn)
 		if err != nil {
-			// This can happen transiently (e.g. daemon hasn't populated
-			// booted status yet). Skip the node; it will be re-evaluated
-			// when the daemon updates the BootcNode.
-			log.V(1).Info("Skipping unclassifiable node", "node", bn.Name, "error", err)
+			// as mentioned in classifyNode(), should never happen...
+			log.Info("WARNING: skipping unclassifiable node", "node", bn.Name, "error", err)
+			rs.unclassified = append(rs.unclassified, bn)
 			continue
 		}
 		log.V(1).Info("Classified node", "node", bn.Name, "state", state.String())
+
+		switch state {
+		case nodeStateIdle:
+			rs.idle = append(rs.idle, bn)
+		case nodeStateStaging:
+			rs.staging = append(rs.staging, bn)
+		case nodeStateStaged:
+			rs.staged = append(rs.staged, bn)
+		case nodeStateRebooting:
+			rs.rebooting = append(rs.rebooting, bn)
+		case nodeStateDegraded:
+			rs.degraded = append(rs.degraded, bn)
+		}
+	}
+	return rs
+}
+
+// resolveMaxUnavailable computes the effective maxUnavailable value from the
+// pool's rollout spec. Defaults to 1 when unset. A value of 0 is allowed and
+// means no reboot slots are available (effectively paused). Returns an
+// invalidSpecError if the value is malformed.
+func resolveMaxUnavailable(pool *bootcv1alpha1.BootcNodePool, nodeCount int) (int, error) {
+	if pool.Spec.Rollout != nil && pool.Spec.Rollout.Paused {
+		return 0, nil
+	}
+	if pool.Spec.Rollout == nil || pool.Spec.Rollout.MaxUnavailable == nil {
+		return 1, nil
 	}
 
-	return nil
+	// We roundUp here; this matches Deployments maxUnavailable for example
+	v, err := intstr.GetScaledValueFromIntOrPercent(pool.Spec.Rollout.MaxUnavailable, nodeCount, true)
+	if err != nil {
+		return 0, newInvalidSpecError(fmt.Sprintf("invalid maxUnavailable %q: %v", pool.Spec.Rollout.MaxUnavailable.String(), err))
+	}
+	return v, nil
+}
+
+// selectDrainCandidates picks Staged nodes that need the drain flow started or
+// restarted. Nodes that already have the in-reboot-slot annotation are always
+// included (e.g. they had a slot before a controller restart and need their
+// drain restarted). These nodes are already counted in occupiedSlots so they
+// don't consume availableSlots. Beyond those, up to availableSlots unslotted
+// nodes are appended, sorted alphabetically.
+func selectDrainCandidates(staged []*bootcv1alpha1.BootcNode, availableSlots int) []*bootcv1alpha1.BootcNode {
+	if len(staged) == 0 {
+		return nil
+	}
+
+	// Partition into already-slotted vs new candidates.
+	var slotted, unslotted []*bootcv1alpha1.BootcNode
+	for _, bn := range staged {
+		if metav1.HasAnnotation(bn.ObjectMeta, bootcv1alpha1.AnnotationInRebootSlot) {
+			slotted = append(slotted, bn)
+		} else {
+			unslotted = append(unslotted, bn)
+		}
+	}
+	slices.SortFunc(slotted, func(a, b *bootcv1alpha1.BootcNode) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+	slices.SortFunc(unslotted, func(a, b *bootcv1alpha1.BootcNode) int {
+		return strings.Compare(a.Name, b.Name)
+	})
+
+	// Always re-select slotted nodes. Fill remaining capacity with
+	// unslotted nodes.
+	result := slotted
+	if availableSlots > 0 && len(unslotted) > 0 {
+		n := min(availableSlots, len(unslotted))
+		result = append(result, unslotted[:n]...)
+	}
+
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+// nodeNames returns the names of the given BootcNodes for logging.
+func nodeNames(nodes []*bootcv1alpha1.BootcNode) []string {
+	names := make([]string, len(nodes))
+	for i, n := range nodes {
+		names[i] = n.Name
+	}
+	return names
 }
 
 // nodeState represents the effective state of a BootcNode as seen by
