@@ -14,6 +14,7 @@ import (
 
 	bootcv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
 	"github.com/jlebon/bootc-operator/test/e2e/e2eutil"
+	testutil "github.com/jlebon/bootc-operator/test/util"
 )
 
 const (
@@ -35,7 +36,7 @@ func TestControllerMembership(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a pool selecting this test's nodes.
-	imageRef := "quay.io/example/myos@sha256:06f961b802bc46ee168555f066d28f4f0e9afdf3f88174c1ee6f9de004fc30a0"
+	imageRef := testutil.ImageDigestRefA
 	pool := env.NewPool("workers", imageRef)
 	g.Expect(env.Client.Create(ctx, pool)).To(Succeed())
 
