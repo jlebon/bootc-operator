@@ -25,18 +25,18 @@ func TestCRDSmoke(t *testing.T) {
 	t.Run("BootcNodePool", func(t *testing.T) {
 		g := NewWithT(t)
 
-		pool := env.NewPool("pool", "quay.io/example/myos:latest")
+		pool := env.NewPool("pool", testutil.ImageTaggedRef)
 		g.Expect(env.Client.Create(ctx, pool)).To(Succeed())
 
 		got := &bootcv1alpha1.BootcNodePool{}
 		g.Expect(env.Client.Get(ctx, client.ObjectKeyFromObject(pool), got)).To(Succeed())
-		g.Expect(got.Spec.Image.Ref).To(Equal("quay.io/example/myos:latest"))
+		g.Expect(got.Spec.Image.Ref).To(Equal(testutil.ImageTaggedRef))
 	})
 
 	t.Run("BootcNode", func(t *testing.T) {
 		g := NewWithT(t)
 
-		node := testutil.NewNode("smoke-node", "quay.io/example/myos@sha256:abc123")
+		node := testutil.NewNode("smoke-node", testutil.ImageDigestRefA)
 		g.Expect(env.Client.Create(ctx, node)).To(Succeed())
 		t.Cleanup(func() {
 			_ = env.Client.Delete(ctx, node)
@@ -44,7 +44,7 @@ func TestCRDSmoke(t *testing.T) {
 
 		got := &bootcv1alpha1.BootcNode{}
 		g.Expect(env.Client.Get(ctx, client.ObjectKeyFromObject(node), got)).To(Succeed())
-		g.Expect(got.Spec.DesiredImage).To(Equal("quay.io/example/myos@sha256:abc123"))
+		g.Expect(got.Spec.DesiredImage).To(Equal(testutil.ImageDigestRefA))
 		g.Expect(got.Spec.DesiredImageState).To(Equal(bootcv1alpha1.DesiredImageStateStaged))
 	})
 }
