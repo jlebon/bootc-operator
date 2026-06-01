@@ -12,6 +12,9 @@ import (
 	bootcv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
 )
 
+// Test fixture values. These are not helpers per se that are any use for e2e
+// tests, but it's a convenient global spot for now. Should probably be moved
+// to a separate envtest-specific package.
 const (
 	ImageRepo = "quay.io/example/myos"
 
