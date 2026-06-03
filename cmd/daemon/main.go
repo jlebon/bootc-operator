@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -14,6 +15,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	bootcv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
@@ -32,6 +34,9 @@ func init() {
 }
 
 func main() {
+	var pollInterval time.Duration
+	flag.DurationVar(&pollInterval, "poll-interval", 5*time.Minute, "Interval for polling bootc status as a fallback to fsnotify")
+
 	opts := zap.Options{
 		Development: true,
 	}
@@ -62,17 +67,32 @@ func main() {
 		os.Exit(1)
 	}
 
+	statusChanged := make(chan event.GenericEvent, 1)
+
 	if err := (&daemon.BootcNodeReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		NodeName: nodeName,
-		Executor: bootc.NewHostExecutor(),
+		Client:        mgr.GetClient(),
+		Scheme:        mgr.GetScheme(),
+		NodeName:      nodeName,
+		Executor:      bootc.NewHostExecutor(),
+		StatusChanged: statusChanged,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "bootcnode")
 		os.Exit(1)
 	}
 
-	setupLog.Info("Starting daemon", "node", nodeName)
+	watcher := &daemon.StatusWatcher{
+		PollInterval: pollInterval,
+		PrimaryPath:  daemon.DefaultPrimaryPath,
+		FallbackPath: daemon.DefaultFallbackPath,
+		Events:       statusChanged,
+		NodeName:     nodeName,
+	}
+	if err := mgr.Add(watcher); err != nil {
+		setupLog.Error(err, "Failed to add status watcher")
+		os.Exit(1)
+	}
+
+	setupLog.Info("Starting daemon", "node", nodeName, "pollInterval", pollInterval)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "Failed to run daemon")
 		os.Exit(1)

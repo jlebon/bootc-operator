@@ -43,18 +43,24 @@ type BootcNodeReconciler struct {
 	NodeName string
 	Executor bootc.Executor
 
-	inflight   switchOp
-	switchDone chan event.GenericEvent
+	inflight      switchOp
+	switchDone    chan event.GenericEvent
+	StatusChanged chan event.GenericEvent
 }
 
 func (r *BootcNodeReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	r.switchDone = make(chan event.GenericEvent, 1)
 
-	return ctrl.NewControllerManagedBy(mgr).
+	builder := ctrl.NewControllerManagedBy(mgr).
 		For(&bootcv1alpha1.BootcNode{}).
 		WatchesRawSource(source.Channel(r.switchDone, &handler.EnqueueRequestForObject{})).
-		Named("bootcnode").
-		Complete(r)
+		Named("bootcnode")
+
+	if r.StatusChanged != nil {
+		builder = builder.WatchesRawSource(source.Channel(r.StatusChanged, &handler.EnqueueRequestForObject{}))
+	}
+
+	return builder.Complete(r)
 }
 
 func (r *BootcNodeReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {

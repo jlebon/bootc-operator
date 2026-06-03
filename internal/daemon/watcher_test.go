@@ -23,12 +23,12 @@ func startWatcher(t *testing.T, w *StatusWatcher) (done <-chan error, cancel con
 
 func TestWatcherEvents(t *testing.T) {
 	tests := []struct {
-		name         string
-		mkPrimary    bool
-		mkFallback   bool
-		touchPrimary bool
+		name          string
+		mkPrimary     bool
+		mkFallback    bool
+		touchPrimary  bool
 		touchFallback bool
-		pollInterval time.Duration
+		pollInterval  time.Duration
 	}{
 		{
 			name:         "Fsnotify",
