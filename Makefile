@@ -59,8 +59,10 @@ e2e: ## Run e2e tests (requires: make deploy-bink). V=1 for verbose. RUN=<regex>
 # actually gives us streaming output (otherwise, it spawns a subprocess for
 # each package, even though we just have one here--but I really like streaming
 # output...).
+	rm -rf $(ARTIFACTS)
 	cd test/e2e && KUBECONFIG=$(abspath $(KUBECONFIG_BINK)) BINK_CLUSTER_NAME=$(BINK_CLUSTER_NAME) \
 		$(if $(BINK_NODE_IMAGE),BINK_NODE_IMAGE=$(BINK_NODE_IMAGE)) \
+		ARTIFACTS=$(ARTIFACTS) \
 		go test -timeout 10m -count=1 $(if $(V),-v) $(if $(RUN),-run $(RUN)) .
 
 ##@ Build

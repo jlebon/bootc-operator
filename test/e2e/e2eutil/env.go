@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -168,8 +169,11 @@ func (e *Env) TestLabels() map[string]string {
 	return map[string]string{LabelE2ETest: e.testID}
 }
 
-// cleanup deletes test-scoped resources and bink nodes.
+// cleanup gathers diagnostic logs, then deletes test-scoped resources
+// and bink nodes.
 func (e *Env) cleanup(t *testing.T) {
+	e.gatherLogs(t)
+
 	ctx := context.Background()
 	t.Logf("Removing pools with label %s=%s...", LabelE2ETest, e.testID)
 	if err := e.Client.DeleteAllOf(ctx, &bootcv1alpha1.BootcNodePool{}, client.MatchingLabels(e.TestLabels())); err != nil {
@@ -180,6 +184,30 @@ func (e *Env) cleanup(t *testing.T) {
 		if err := runBink(t, "node", "remove", name, "--force", "--cluster-name", e.clusterName); err != nil {
 			t.Logf("WARNING: failed to remove node %q: %v", name, err)
 		}
+	}
+}
+
+// gatherLogs calls hack/gather-logs.sh to collect diagnostic logs into
+// $ARTIFACTS/<testID>/. Skipped if ARTIFACTS is not set.
+func (e *Env) gatherLogs(t *testing.T) {
+	artifactsDir := os.Getenv("ARTIFACTS")
+	if artifactsDir == "" {
+		return
+	}
+
+	outputDir := filepath.Join(artifactsDir, e.testID)
+
+	// The test runs from test/e2e/, so resolve the script relative
+	// to the repo root.
+	args := []string{"../../hack/gather-logs.sh", outputDir}
+	args = append(args, e.nodes...)
+
+	t.Logf("Gathering logs to %s...", outputDir)
+	cmd := exec.Command("bash", args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		t.Logf("WARNING: gather-logs.sh failed: %v", err)
 	}
 }
 
