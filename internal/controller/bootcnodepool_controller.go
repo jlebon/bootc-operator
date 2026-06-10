@@ -380,7 +380,8 @@ func (r *BootcNodePoolReconciler) syncMembership(ctx context.Context, pool *boot
 		} else {
 			// New match: create BootcNode and label the node.
 			log.Info("Creating BootcNode for new match", "node", nodeName)
-			if err := r.createBootcNode(ctx, pool, node); err != nil {
+			bn, err := r.createBootcNode(ctx, pool, node)
+			if err != nil {
 				if !apierrors.IsAlreadyExists(err) {
 					return nil, fmt.Errorf("creating BootcNode for %s: %w", nodeName, err)
 				}
@@ -390,6 +391,8 @@ func (r *BootcNodePoolReconciler) syncMembership(ctx context.Context, pool *boot
 						conflicting[owner.Name] = true
 					}
 				}
+			} else {
+				ownedSet[nodeName] = bn
 			}
 		}
 	}
@@ -484,7 +487,7 @@ func desiredImageFromPool(pool *bootcv1alpha1.BootcNodePool) string {
 
 // createBootcNode creates a BootcNode for a node joining the pool and
 // labels the node as managed.
-func (r *BootcNodePoolReconciler) createBootcNode(ctx context.Context, pool *bootcv1alpha1.BootcNodePool, node *corev1.Node) error {
+func (r *BootcNodePoolReconciler) createBootcNode(ctx context.Context, pool *bootcv1alpha1.BootcNodePool, node *corev1.Node) (*bootcv1alpha1.BootcNode, error) {
 	bn := &bootcv1alpha1.BootcNode{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: node.Name,
@@ -503,19 +506,19 @@ func (r *BootcNodePoolReconciler) createBootcNode(ctx context.Context, pool *boo
 	// Set ownerReference so the BootcNode is cleaned up if the pool is
 	// deleted and so the Owns() watch routes BootcNode events to this pool.
 	if err := controllerutil.SetControllerReference(pool, bn, r.Scheme); err != nil {
-		return fmt.Errorf("setting owner reference: %w", err)
+		return nil, fmt.Errorf("setting owner reference: %w", err)
 	}
 
 	if err := r.Create(ctx, bn); err != nil {
-		return fmt.Errorf("creating BootcNode: %w", err)
+		return nil, fmt.Errorf("creating BootcNode: %w", err)
 	}
 
 	// Label the node as managed.
 	if err := r.ensureManagedLabel(ctx, node, true); err != nil {
-		return fmt.Errorf("labeling node: %w", err)
+		return nil, fmt.Errorf("labeling node: %w", err)
 	}
 
-	return nil
+	return bn, nil
 }
 
 // ensureManagedLabel adds or removes the bootc.dev/managed label on a Node.
