@@ -18,10 +18,10 @@ type fakeExecutor struct {
 	status    bootc.Status
 	statusErr error
 
-	switchErr    error
-	switchImg    string
-	switchApply  bool
-	switchHook   func()
+	switchErr  error
+	switchImg  string
+	switchHook func()
+	rebooted   bool
 }
 
 func (f *fakeExecutor) Status(_ context.Context) ([]byte, error) {
@@ -37,10 +37,9 @@ func (f *fakeExecutor) Status(_ context.Context) ([]byte, error) {
 	return data, nil
 }
 
-func (f *fakeExecutor) Switch(_ context.Context, image string, apply bool) error {
+func (f *fakeExecutor) Switch(_ context.Context, image string) error {
 	f.mu.Lock()
 	f.switchImg = image
-	f.switchApply = apply
 	hook := f.switchHook
 	err := f.switchErr
 	f.mu.Unlock()
@@ -56,6 +55,13 @@ func (f *fakeExecutor) Switch(_ context.Context, image string, apply bool) error
 	defer f.mu.Unlock()
 	_, digest, _ := strings.Cut(image, "@")
 	f.status.Status.Staged = newBootEntry(image, digest)
+	return nil
+}
+
+func (f *fakeExecutor) Reboot(_ context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.rebooted = true
 	return nil
 }
 
@@ -83,10 +89,10 @@ func (f *fakeExecutor) getSwitchImg() string {
 	return f.switchImg
 }
 
-func (f *fakeExecutor) getSwitchApply() bool {
+func (f *fakeExecutor) getRebooted() bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.switchApply
+	return f.rebooted
 }
 
 func (f *fakeExecutor) reset() {
@@ -97,7 +103,7 @@ func (f *fakeExecutor) reset() {
 	f.switchErr = nil
 	f.switchImg = ""
 	f.switchHook = nil
-	f.switchApply = false
+	f.rebooted = false
 }
 
 func newBootEntry(image, digest string) *bootc.BootEntry {
