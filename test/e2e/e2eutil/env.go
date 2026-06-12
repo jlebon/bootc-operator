@@ -60,6 +60,10 @@ type Env struct {
 	// nodeImageRegistry is the in-cluster registry path for the seeded node image
 	// (e.g. "registry.cluster.local:5000/node"). Empty when not seeded.
 	nodeImageRegistry string
+
+	// updateImageDigest is the manifest digest of the update image
+	// (e.g. "sha256:def456..."). Empty when not built.
+	updateImageDigest string
 }
 
 // New connects to an existing bink cluster and returns an Env ready
@@ -80,6 +84,7 @@ func New(t *testing.T) *Env {
 
 	nodeImageDigest := os.Getenv("BINK_NODE_IMAGE_DIGEST")
 	nodeImageRegistry := os.Getenv("BINK_LOCAL_REGISTRY_NODE_IMAGE")
+	updateImageDigest := os.Getenv("UPDATE_IMAGE_DIGEST")
 
 	k8sClient := buildClient(t, kubeconfigPath)
 
@@ -89,6 +94,7 @@ func New(t *testing.T) *Env {
 		testID:            sanitizeTestName(t.Name()),
 		nodeImageDigest:   nodeImageDigest,
 		nodeImageRegistry: nodeImageRegistry,
+		updateImageDigest: updateImageDigest,
 	}
 
 	t.Cleanup(func() {
@@ -212,6 +218,20 @@ func (e *Env) NodeImageDigestedPullSpec() string {
 // NodeImageDigest returns the manifest digest of the seeded node image.
 func (e *Env) NodeImageDigest() string {
 	return e.nodeImageDigest
+}
+
+// UpdateImageDigestedPullSpec returns the digest-qualified reference for the
+// update image (e.g. "registry.cluster.local:5000/node@sha256:def456").
+func (e *Env) UpdateImageDigestedPullSpec() string {
+	if e.nodeImageRegistry == "" || e.updateImageDigest == "" {
+		return ""
+	}
+	return e.nodeImageRegistry + "@" + e.updateImageDigest
+}
+
+// UpdateImageDigest returns the manifest digest of the update image.
+func (e *Env) UpdateImageDigest() string {
+	return e.updateImageDigest
 }
 
 // cleanup gathers diagnostic logs, then deletes test-scoped resources

@@ -4,6 +4,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	bootcv1alpha1 "github.com/jlebon/bootc-operator/api/v1alpha1"
+	"github.com/jlebon/bootc-operator/internal/bootc"
 	testutil "github.com/jlebon/bootc-operator/test/util"
 )
 
@@ -20,55 +22,12 @@ const (
 	pollInterval = 200 * time.Millisecond
 	pollTimeout  = 10 * time.Second
 
-	testImageRef = testutil.ImageDigestRefA
+	switchErrMsg      = "switch failed: pull error"
+	bootcStatusErrMsg = "bootc status failed"
 
-	bootcStatusFull = `{
-  "apiVersion": "org.containers.bootc/v1alpha1",
-  "kind": "BootcHost",
-  "spec": {
-    "image": {"image": "quay.io/example/myos:latest", "transport": "registry"},
-    "bootOrder": "default"
-  },
-  "status": {
-    "booted": {
-      "image": {
-        "image": {"image": "quay.io/example/myos:latest", "transport": "registry"},
-        "imageDigest": "` + testutil.DigestA + `",
-        "version": "1.0",
-        "architecture": "amd64"
-      },
-      "incompatible": false,
-      "pinned": false,
-      "softRebootCapable": false,
-      "downloadOnly": false
-    },
-    "staged": {
-      "image": {
-        "image": {"image": "quay.io/example/myos:latest", "transport": "registry"},
-        "imageDigest": "` + testutil.DigestB + `",
-        "version": "2.0",
-        "architecture": "amd64"
-      },
-      "incompatible": false,
-      "pinned": false,
-      "softRebootCapable": true,
-      "downloadOnly": false
-    },
-    "rollback": {
-      "image": {
-        "image": {"image": "quay.io/example/myos:latest", "transport": "registry"},
-        "imageDigest": "` + testutil.DigestC + `",
-        "version": "0.9",
-        "architecture": "amd64"
-      },
-      "incompatible": false,
-      "pinned": false,
-      "softRebootCapable": false,
-      "downloadOnly": false
-    },
-    "rollbackQueued": false
-  }
-}`
+	testImageRef      = testutil.ImageDigestRefA
+	testOtherImageRef = testutil.ImageDigestRefB
+	testThirdImageRef = testutil.ImageDigestRefC
 )
 
 func TestReconcilePopulatesStatus(t *testing.T) {
@@ -77,7 +36,28 @@ func TestReconcilePopulatesStatus(t *testing.T) {
 	g.SetDefaultEventuallyPollingInterval(pollInterval)
 	ctx := context.Background()
 
-	fake.set([]byte(bootcStatusFull), nil)
+	v1 := "1.0"
+	v2 := "2.0"
+	v3 := "0.9"
+	fake.status = newBootcStatus(testutil.DigestA)
+	fake.status.Status.Booted.Image.Version = &v1
+	fake.status.Status.Staged = &bootc.BootEntry{
+		Image: &bootc.ImageStatus{
+			Image:        bootc.ImageReference{Image: testutil.ImageTaggedRef, Transport: "registry"},
+			ImageDigest:  testutil.DigestB,
+			Version:      &v2,
+			Architecture: "amd64",
+		},
+		SoftRebootCapable: true,
+	}
+	fake.status.Status.Rollback = &bootc.BootEntry{
+		Image: &bootc.ImageStatus{
+			Image:        bootc.ImageReference{Image: testutil.ImageTaggedRef, Transport: "registry"},
+			ImageDigest:  testutil.DigestC,
+			Version:      &v3,
+			Architecture: "amd64",
+		},
+	}
 
 	bn := testutil.NewNode(testNodeName, testImageRef)
 	g.Expect(k8sClient.Create(ctx, bn)).To(Succeed())
@@ -123,7 +103,8 @@ func TestReconcileBootcStatusError(t *testing.T) {
 	g.SetDefaultEventuallyPollingInterval(pollInterval)
 	ctx := context.Background()
 
-	fake.set(nil, fmt.Errorf("bootc status failed"))
+	fake.reset()
+	fake.setStatusErr(errors.New(bootcStatusErrMsg))
 
 	bn := testutil.NewNode(testNodeName, testImageRef)
 	g.Expect(k8sClient.Create(ctx, bn)).To(Succeed())
@@ -138,20 +119,59 @@ func TestReconcileBootcStatusError(t *testing.T) {
 			HaveField("Type", bootcv1alpha1.NodeDegraded),
 			HaveField("Status", metav1.ConditionTrue),
 			HaveField("Reason", bootcv1alpha1.NodeReasonError),
-			HaveField("Message", ContainSubstring("bootc status")),
+			HaveField("Message", Equal(fmt.Sprintf("failed to get bootc status: getting bootc status: %s", bootcStatusErrMsg))),
 		)))
 	}).Should(Succeed())
 }
 
-func TestReconcileInvalidJSON(t *testing.T) {
+func TestStagingTriggered(t *testing.T) {
 	g := NewWithT(t)
 	g.SetDefaultEventuallyTimeout(pollTimeout)
 	g.SetDefaultEventuallyPollingInterval(pollInterval)
 	ctx := context.Background()
 
-	fake.set([]byte(`{invalid json`), nil)
+	fake.reset()
+	fake.status = newBootcStatus(testutil.DigestA)
 
-	bn := testutil.NewNode(testNodeName, testImageRef)
+	bn := testutil.NewNode(testNodeName, testOtherImageRef)
+	g.Expect(k8sClient.Create(ctx, bn)).To(Succeed())
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, bn)
+	})
+
+	g.Eventually(func(g Gomega) {
+		var got bootcv1alpha1.BootcNode
+		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bn), &got)).To(Succeed())
+
+		g.Expect(got.Status.Staged).NotTo(BeNil())
+		g.Expect(got.Status.Staged.ImageDigest).To(Equal(testutil.DigestB))
+
+		g.Expect(got.Status.Conditions).To(ContainElement(And(
+			HaveField("Type", bootcv1alpha1.NodeIdle),
+			HaveField("Status", metav1.ConditionFalse),
+			HaveField("Reason", bootcv1alpha1.NodeReasonStaged),
+		)))
+		g.Expect(got.Status.Conditions).To(ContainElement(And(
+			HaveField("Type", bootcv1alpha1.NodeDegraded),
+			HaveField("Status", metav1.ConditionFalse),
+		)))
+	}).Should(Succeed())
+
+	g.Expect(fake.getSwitchImg()).To(Equal(testOtherImageRef))
+	g.Expect(fake.getRebooted()).To(BeFalse())
+}
+
+func TestStagingError(t *testing.T) {
+	g := NewWithT(t)
+	g.SetDefaultEventuallyTimeout(pollTimeout)
+	g.SetDefaultEventuallyPollingInterval(pollInterval)
+	ctx := context.Background()
+
+	fake.reset()
+	fake.status = newBootcStatus(testutil.DigestA)
+	fake.setSwitchErr(errors.New(switchErrMsg))
+
+	bn := testutil.NewNode(testNodeName, testOtherImageRef)
 	g.Expect(k8sClient.Create(ctx, bn)).To(Succeed())
 	t.Cleanup(func() {
 		_ = k8sClient.Delete(ctx, bn)
@@ -161,10 +181,143 @@ func TestReconcileInvalidJSON(t *testing.T) {
 		var got bootcv1alpha1.BootcNode
 		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bn), &got)).To(Succeed())
 		g.Expect(got.Status.Conditions).To(ContainElement(And(
+			HaveField("Type", bootcv1alpha1.NodeIdle),
+			HaveField("Status", metav1.ConditionTrue),
+			HaveField("Reason", bootcv1alpha1.NodeReasonIdle),
+		)))
+		g.Expect(got.Status.Conditions).To(ContainElement(And(
 			HaveField("Type", bootcv1alpha1.NodeDegraded),
 			HaveField("Status", metav1.ConditionTrue),
 			HaveField("Reason", bootcv1alpha1.NodeReasonError),
-			HaveField("Message", ContainSubstring("parse")),
+			HaveField("Message", Equal(fmt.Sprintf("bootc switch failed: %s", switchErrMsg))),
 		)))
 	}).Should(Succeed())
+}
+
+func TestAlreadyStaged(t *testing.T) {
+	g := NewWithT(t)
+	g.SetDefaultEventuallyTimeout(pollTimeout)
+	g.SetDefaultEventuallyPollingInterval(pollInterval)
+	ctx := context.Background()
+
+	fake.reset()
+	fake.status = newBootcStatus(testutil.DigestA)
+	fake.status.Status.Staged = newBootEntry(testutil.ImageDigestRefB, testutil.DigestB)
+
+	bn := testutil.NewNode(testNodeName, testOtherImageRef)
+	g.Expect(k8sClient.Create(ctx, bn)).To(Succeed())
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, bn)
+	})
+
+	g.Eventually(func(g Gomega) {
+		var got bootcv1alpha1.BootcNode
+		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bn), &got)).To(Succeed())
+		g.Expect(got.Status.Conditions).To(ContainElement(And(
+			HaveField("Type", bootcv1alpha1.NodeIdle),
+			HaveField("Status", metav1.ConditionFalse),
+			HaveField("Reason", bootcv1alpha1.NodeReasonStaged),
+		)))
+	}).Should(Succeed())
+
+	g.Expect(fake.getSwitchImg()).To(BeEmpty())
+}
+
+func TestRebootingSet(t *testing.T) {
+	g := NewWithT(t)
+	g.SetDefaultEventuallyTimeout(pollTimeout)
+	g.SetDefaultEventuallyPollingInterval(pollInterval)
+	ctx := context.Background()
+
+	fake.reset()
+	fake.status = newBootcStatus(testutil.DigestA)
+	fake.status.Status.Staged = newBootEntry(testutil.ImageDigestRefB, testutil.DigestB)
+
+	bn := testutil.NewNode(testNodeName, testOtherImageRef, testutil.WithDesiredImageState(bootcv1alpha1.DesiredImageStateBooted))
+	g.Expect(k8sClient.Create(ctx, bn)).To(Succeed())
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, bn)
+	})
+
+	g.Eventually(func(g Gomega) {
+		var got bootcv1alpha1.BootcNode
+		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bn), &got)).To(Succeed())
+		g.Expect(got.Status.Conditions).To(ContainElement(And(
+			HaveField("Type", bootcv1alpha1.NodeIdle),
+			HaveField("Status", metav1.ConditionFalse),
+			HaveField("Reason", bootcv1alpha1.NodeReasonRebooting),
+		)))
+	}).Should(Succeed())
+
+	g.Expect(fake.getRebooted()).To(BeTrue())
+}
+
+func TestRollback(t *testing.T) {
+	g := NewWithT(t)
+	g.SetDefaultEventuallyTimeout(pollTimeout)
+	g.SetDefaultEventuallyPollingInterval(pollInterval)
+	ctx := context.Background()
+
+	fake.reset()
+	fake.status = newBootcStatus(testutil.DigestA)
+	fake.status.Status.Staged = newBootEntry(testutil.ImageDigestRefB, testutil.DigestB)
+
+	bn := testutil.NewNode(testNodeName, testThirdImageRef)
+	g.Expect(k8sClient.Create(ctx, bn)).To(Succeed())
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, bn)
+	})
+
+	g.Eventually(func(g Gomega) {
+		var got bootcv1alpha1.BootcNode
+		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bn), &got)).To(Succeed())
+		g.Expect(got.Status.Conditions).To(ContainElement(And(
+			HaveField("Type", bootcv1alpha1.NodeIdle),
+			HaveField("Status", metav1.ConditionFalse),
+			HaveField("Reason", bootcv1alpha1.NodeReasonStaged),
+		)))
+		g.Expect(got.Status.Staged).NotTo(BeNil())
+		g.Expect(got.Status.Staged.ImageDigest).To(Equal(testutil.DigestC))
+	}).Should(Succeed())
+
+	g.Expect(fake.getRebooted()).To(BeFalse())
+}
+
+func TestCancelInflightSwitch(t *testing.T) {
+	g := NewWithT(t)
+	g.SetDefaultEventuallyTimeout(pollTimeout)
+	g.SetDefaultEventuallyPollingInterval(pollInterval)
+	ctx := context.Background()
+
+	fake.reset()
+	fake.status = newBootcStatus(testutil.DigestA)
+
+	firstBlock := make(chan struct{})
+	fake.setSwitchHook(func() {
+		<-firstBlock
+	})
+
+	bn := testutil.NewNode(testNodeName, testOtherImageRef)
+	g.Expect(k8sClient.Create(ctx, bn)).To(Succeed())
+	t.Cleanup(func() {
+		_ = k8sClient.Delete(ctx, bn)
+	})
+
+	g.Eventually(func() string {
+		return fake.getSwitchImg()
+	}).Should(Equal(testOtherImageRef))
+
+	fake.setSwitchHook(nil)
+	close(firstBlock)
+
+	g.Eventually(func(g Gomega) {
+		var latest bootcv1alpha1.BootcNode
+		g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(bn), &latest)).To(Succeed())
+		latest.Spec.DesiredImage = testThirdImageRef
+		g.Expect(k8sClient.Update(ctx, &latest)).To(Succeed())
+	}).Should(Succeed())
+
+	g.Eventually(func() string {
+		return fake.getSwitchImg()
+	}).Should(Equal(testThirdImageRef))
 }
